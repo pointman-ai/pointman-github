@@ -1,10 +1,10 @@
 [package]
-name = "gitview"
+name = "gh"
 version = "0.1.0"
 edition = "2021"
-description = "What a GitHub link shows, for Pointman's viewer panel: a PR's or a commit's diff, or a file at a commit."
+description = "GitHub on Pointman's nodes: the apps' GitHub viewer, from the machine's gh login."
 license = "MIT"
-repository = "https://github.com/pointman-ai/pointman-gitview"
+repository = "https://github.com/pointman-ai/pointman-gh"
 publish = false
 
 [dependencies]

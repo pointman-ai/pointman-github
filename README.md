@@ -1,15 +1,16 @@
-# gitview
+# gh
 
-What a GitHub link shows, for Pointman's viewer panel: a PR's or a commit's changed files with GitHub's
+GitHub on Pointman's nodes (James, Pointman thread 649 [4500], [4505]: the GitHub integration lives on
+nodes and in the apps, not in core). Today: what a GitHub link shows, for the apps' viewer panel: a PR's or a commit's changed files with GitHub's
 unified diff of each, a file at a commit around its lines with how that file changed in its PR, and a PR's
 or an issue's conversation. A Pointman extension that runs on a node. Nothing of it is in core (James, Pointman thread 649 [4443]).
 
 GitHub is asked with the machine's own `gh` login, so the viewer sees what that login sees. Install
 [GitHub's CLI](https://cli.github.com) and run `gh auth login` on the machine first. If `gh` isn't on the
-node's PATH, or in /opt/homebrew/bin or /usr/local/bin, set its path in the extension's `gh` setting.
+node's PATH, or in /opt/homebrew/bin or /usr/local/bin, set its path in the extension's `cli` setting.
 
 ```
-pointman add gitview
+pointman add gh
 ```
 
 ## The apps' call
@@ -17,7 +18,7 @@ pointman add gitview
 Through core's jobs, as for any extension's command:
 
 ```
-POST /v1/workspaces/{ws}/jobs  {"kind": "gitview.view", "params": {"url": "<a GitHub link>"}}
+POST /v1/workspaces/{ws}/jobs  {"kind": "gh.view", "params": {"url": "<a GitHub link>"}}
 ```
 
 The job's result (its `job.updated` event, or `GET /v1/workspaces/{ws}/jobs/{job}`):

@@ -16,7 +16,7 @@ fn fake_gh() -> PathBuf {
 }
 
 fn write_gh() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gitview-gh-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("pointman-gh-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let pull = json!({"number": 42, "title": "Fix the thing", "state": "open", "draft": false, "merged": true,
                       "head": {"sha": "c8b3559aaaa"}, "user": {"login": "patchbay"}, "body": "It fixes it.",
@@ -65,11 +65,11 @@ esac
 
 fn view(url: &str) -> Result<Value, String> {
     let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
-        .binary(env!("CARGO_BIN_EXE_gitview"))
-        .settings(json!({"gh": fake_gh().to_string_lossy()}))
+        .binary(env!("CARGO_BIN_EXE_gh"))
+        .settings(json!({"cli": fake_gh().to_string_lossy()}))
         .start()
         .unwrap();
-    node.run("gitview.view", json!({"url": url})).map(|d| d.result).map_err(|f| f.message)
+    node.run("gh.view", json!({"url": url})).map(|d| d.result).map_err(|f| f.message)
 }
 
 #[test]
@@ -154,8 +154,8 @@ fn what_github_doesnt_show_fails_saying_so() {
 #[test]
 #[ignore]
 fn the_real_github() {
-    let node = StandIn::new(env!("CARGO_MANIFEST_DIR")).binary(env!("CARGO_BIN_EXE_gitview")).start().unwrap();
-    let run = |url: &str| node.run("gitview.view", json!({"url": url})).map(|d| d.result).map_err(|f| f.message);
+    let node = StandIn::new(env!("CARGO_MANIFEST_DIR")).binary(env!("CARGO_BIN_EXE_gh")).start().unwrap();
+    let run = |url: &str| node.run("gh.view", json!({"url": url})).map(|d| d.result).map_err(|f| f.message);
     let v = run("https://github.com/pointman-ai/pointman/commit/6946239").unwrap();
     assert_eq!(v["files"].as_array().unwrap().len(), 3, "{v}");
     let v = run("https://github.com/pointman-ai/pointman/blob/6946239/src/messageboard/server/v1/people.py#L345-L350")

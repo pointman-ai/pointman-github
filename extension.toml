@@ -1,18 +1,18 @@
-# Pointman's GitHub viewer, on a node (James, Pointman thread 649 [4424], [4443]: GitHub links open their
-# diff in a panel, and nothing of it is in core). The apps ask for a link through core's jobs
-# (POST /v1/workspaces/{ws}/jobs {kind: "gitview.view", params: {url}}) and draw the answer; GitHub is
-# asked with this machine's own `gh` login.
+# GitHub on Pointman's nodes, with nothing of it in core (James, Pointman thread 649 [4443], [4500], [4505]):
+# GitHub's CLI on each node and the apps' GitHub viewer. The apps ask for a link through core's jobs
+# (POST /v1/workspaces/{ws}/jobs {kind: "gh.view", params: {url}}) and draw the answer; GitHub is asked
+# with this machine's own `gh` login.
 [extension]
-id = "gitview"
-name = "GitHub viewer"
+id = "gh"
+name = "GitHub"
 version = "0.1.0"
 publisher = "aurelio"
-summary = "What a GitHub link shows, for the apps' viewer: a PR's or a commit's diff, or a file at a commit."
+summary = "GitHub's CLI on this machine, and what a GitHub link shows in the apps' viewer: diffs, files, PR and issue threads."
 node = ">=0.1,<1"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
-command = ["bin/gitview"]
+command = ["bin/gh"]
 runtime = "binary"
 
 [permissions]
@@ -22,12 +22,12 @@ drives_apps = ["gh"]             # GitHub's CLI, signed in on this machine: GitH
 [settings]
 type = "object"
 
-[settings.properties.gh]
+[settings.properties.cli]
 type = "string"
 default = ""
 description = "GitHub's CLI, when it isn't on the node's PATH or in /opt/homebrew/bin or /usr/local/bin"
 
 [[commands]]
-kind = "gitview.view"
+kind = "gh.view"
 title = "What a GitHub link shows"
 params = { type = "object", required = ["url"], properties = { url = { type = "string", description = "A PR, a commit, or a file at a commit (#L10-L20 for lines)" } } }
