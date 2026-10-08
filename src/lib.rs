@@ -1,15 +1,20 @@
-//! What a GitHub link shows, for Pointman's viewer panel (James, Pointman thread 649 [4424], [4443]): a PR's
-//! or a commit's changed files with GitHub's unified diff of each, or a file at a commit around its lines,
-//! with how that file changed in its commit's PR. GitHub is asked with this machine's `gh` login, so the
+//! What a GitHub link shows, for Pointman's viewer panel (James, Pointman thread 649 [4424], [4443], [4500]):
+//! a PR's or a commit's changed files with GitHub's unified diff of each, a file at a commit around its
+//! lines with how that file changed in its commit's PR, and a PR's or an issue's conversation. GitHub is asked with this machine's `gh` login, so the
 //! viewer sees what that login sees.
 //!
 //! The answer, as the apps draw it:
 //!
 //! ```text
-//! {kind: "file"|"pull"|"commit", repo, url, title, ref, lines: [from, to] | null,
+//! {kind: "file"|"pull"|"commit"|"issue", repo, url, title, ref, lines: [from, to] | null,
 //!  pull: {number, title, state} | null,
+//!  issue: {number, title, state} | null,
 //!  file: {path, text, language, truncated} | null,
-//!  files: [{path, previous_path, status, additions, deletions, patch | null}]}
+//!  files: [{path, previous_path, status, additions, deletions, patch | null}],
+//!  thread: {author, body, created_at, url,                      // a PR's or an issue's, else null
+//!           comments: [{author, body, created_at, url}],
+//!           reviews: [{author, state, body, submitted_at, url}],  // a PR's
+//!           review_comments: [{author, body, created_at, path, line, url, in_reply_to}]} | null}
 //! ```
 
 use std::collections::HashMap;
@@ -25,7 +30,7 @@ use serde_json::{json, Value};
 
 /// A file's text in the viewer; longer is cut, and says so.
 pub const TEXT_MAX: usize = 512 * 1024;
-/// A PR's or a commit's files (GitHub lists 3,000 at most).
+/// A PR's or a commit's files (GitHub lists 3,000 at most), and a thread's comments of each kind.
 pub const FILES_MAX: usize = 300;
 /// How long an answer is kept, as core keeps link pills.
 const KEEP: Duration = Duration::from_secs(60);
@@ -75,9 +80,9 @@ const LANGUAGES: &[(&str, &str)] = &[
 #[derive(Debug, PartialEq)]
 pub struct Link {
     pub repo: String,
-    /// "pull", "commit" or "file"
+    /// "pull", "commit", "issue" or "file"
     pub kind: &'static str,
-    /// The PR's number, the commit's sha, or the file's ref.
+    /// The PR's or the issue's number, the commit's sha, or the file's ref.
     pub reference: String,
     /// A file's path in the repo, decoded.
     pub path: Option<String>,
@@ -88,7 +93,7 @@ pub struct Link {
 
 fn link_pattern() -> Regex {
     Regex::new(
-        r"^https://github\.com/(?P<owner>[A-Za-z0-9-]{1,39})/(?P<repo>[A-Za-z0-9._-]{1,100})/(?:(?P<kind>pull|commit)/(?P<ref>[0-9]{1,9}|[0-9a-f]{7,40})(?:/[^#?]*)?|blob/(?P<blob_ref>[A-Za-z0-9._-]{1,100})/(?P<path>[^#?]+))(?:\?[^#]*)?(?:#(?P<frag>\S*))?$",
+        r"^https://github\.com/(?P<owner>[A-Za-z0-9-]{1,39})/(?P<repo>[A-Za-z0-9._-]{1,100})/(?:(?P<kind>pull|commit|issues)/(?P<ref>[0-9]{1,9}|[0-9a-f]{7,40})(?:/[^#?]*)?|blob/(?P<blob_ref>[A-Za-z0-9._-]{1,100})/(?P<path>[^#?]+))(?:\?[^#]*)?(?:#(?P<frag>\S*))?$",
     )
     .expect("the link pattern compiles")
 }
@@ -122,10 +127,10 @@ fn encode(segment: &str) -> String {
         .collect()
 }
 
-/// A GitHub link the viewer shows: a PR, a commit, or a file at a ref (`#L10-L20` for lines).
+/// A GitHub link the viewer shows: a PR, a commit, an issue, or a file at a ref (`#L10-L20` for lines).
 pub fn parse(url: &str) -> anyhow::Result<Link> {
     let Some(m) = link_pattern().captures(url.trim()) else {
-        bail!("that isn't a link to a GitHub PR, commit or file");
+        bail!("that isn't a link to a GitHub PR, commit, issue or file");
     };
     let repo = format!("{}/{}", &m["owner"], &m["repo"]);
     let lines = m.name("frag").and_then(|f| {
@@ -136,7 +141,14 @@ pub fn parse(url: &str) -> anyhow::Result<Link> {
     });
     let url = url.trim().split('#').next().unwrap_or_default().to_string();
     if let Some(kind) = m.name("kind") {
-        let kind = if kind.as_str() == "pull" { "pull" } else { "commit" };
+        let kind = match kind.as_str() {
+            "pull" => "pull",
+            "issues" => "issue",
+            _ => "commit",
+        };
+        if kind != "commit" && !m["ref"].bytes().all(|b| b.is_ascii_digit()) {
+            bail!("that isn't a link to a GitHub PR, commit, issue or file");
+        }
         return Ok(Link { repo, kind, reference: m["ref"].to_string(), path: None, lines, url });
     }
     let reference = m["blob_ref"].to_string();
@@ -265,12 +277,13 @@ impl GitHub {
         serde_json::from_slice(&body).with_context(|| format!("GitHub's answer for {path}"))
     }
 
-    fn pull_files(&self, repo: &str, number: u64) -> anyhow::Result<Vec<Value>> {
+    /// A list GitHub pages, up to FILES_MAX.
+    fn list(&self, path: &str) -> anyhow::Result<Vec<Value>> {
         let mut out = vec![];
         for page in 1..=FILES_MAX / 100 {
-            let items = self.json(&format!("repos/{repo}/pulls/{number}/files?per_page=100&page={page}"))?;
+            let items = self.json(&format!("{path}?per_page=100&page={page}"))?;
             let items = items.as_array().cloned().unwrap_or_default();
-            out.extend(items.iter().filter(|f| f.is_object()).map(changed));
+            out.extend(items.iter().filter(|f| f.is_object()).cloned());
             if items.len() < 100 {
                 break;
             }
@@ -278,11 +291,44 @@ impl GitHub {
         Ok(out)
     }
 
+    fn pull_files(&self, repo: &str, number: u64) -> anyhow::Result<Vec<Value>> {
+        Ok(self.list(&format!("repos/{repo}/pulls/{number}/files"))?.iter().map(changed).collect())
+    }
+
+    /// A PR's or an issue's conversation: its description, comments, and a PR's reviews and their comments
+    /// on lines, each oldest first.
+    fn thread(&self, repo: &str, d: &Value, is_pull: bool) -> anyhow::Result<Value> {
+        let n = d["number"].as_u64().unwrap_or_default();
+        let comments = self.list(&format!("repos/{repo}/issues/{n}/comments"))?;
+        let (reviews, on_lines) = if is_pull {
+            (
+                self.list(&format!("repos/{repo}/pulls/{n}/reviews"))?,
+                self.list(&format!("repos/{repo}/pulls/{n}/comments"))?,
+            )
+        } else {
+            (vec![], vec![])
+        };
+        Ok(json!({
+            "author": d["user"]["login"], "body": d["body"], "created_at": d["created_at"], "url": d["html_url"],
+            "comments": comments.iter().map(|c| json!({"author": c["user"]["login"], "body": c["body"],
+                                                      "created_at": c["created_at"], "url": c["html_url"]}))
+                                .collect::<Vec<_>>(),
+            "reviews": reviews.iter().map(|r| json!({"author": r["user"]["login"], "state": r["state"], "body": r["body"],
+                                                    "submitted_at": r["submitted_at"], "url": r["html_url"]}))
+                              .collect::<Vec<_>>(),
+            "review_comments": on_lines.iter().map(|c| json!({
+                "author": c["user"]["login"], "body": c["body"], "created_at": c["created_at"], "path": c["path"],
+                "line": if c["line"].is_null() { c["original_line"].clone() } else { c["line"].clone() },
+                "url": c["html_url"], "in_reply_to": c.get("in_reply_to_id").cloned().unwrap_or(Value::Null)}))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
     /// What the viewer shows for a link.
     pub fn view(&self, link: &Link) -> anyhow::Result<Value> {
         let repo = &link.repo;
-        let mut out = json!({"kind": link.kind, "repo": repo, "url": link.url, "pull": null, "file": null,
-                             "files": [], "lines": link.lines});
+        let mut out = json!({"kind": link.kind, "repo": repo, "url": link.url, "pull": null, "issue": null,
+                             "file": null, "files": [], "thread": null, "lines": link.lines});
         match link.kind {
             "pull" => {
                 let d = self.json(&format!("repos/{repo}/pulls/{}", link.reference)).map_err(not_there("PR"))?;
@@ -290,6 +336,14 @@ impl GitHub {
                 out["ref"] = d["head"]["sha"].clone();
                 out["pull"] = pull(&d, d["merged"].as_bool() == Some(true));
                 out["files"] = Value::Array(self.pull_files(repo, link.reference.parse()?)?);
+                out["thread"] = self.thread(repo, &d, true)?;
+            }
+            "issue" => {
+                let d = self.json(&format!("repos/{repo}/issues/{}", link.reference)).map_err(not_there("issue"))?;
+                out["title"] = d["title"].clone();
+                out["ref"] = Value::Null;
+                out["issue"] = json!({"number": d["number"], "title": d["title"], "state": d["state"]});
+                out["thread"] = self.thread(repo, &d, false)?;
             }
             "commit" => {
                 let d = self.json(&format!("repos/{repo}/commits/{}", link.reference)).map_err(not_there("commit"))?;
@@ -400,7 +454,8 @@ mod tests {
         assert_eq!((l.kind, l.path.as_deref(), l.lines), ("file", Some("src/my file.py"), Some([4, 10])));
         assert_eq!(parse("https://github.com/a/b/blob/main/x.rs#L340").unwrap().lines, Some([340, 340]));
         for bad in [
-            "https://github.com/a/b/issues/1",
+            "https://github.com/a/b/issues/abc1234",
+            "https://github.com/a/b/discussions/1",
             "https://gitlab.com/a/b/pull/1",
             "https://github.com/a/b/blob/main/../secrets",
             "https://github.com/a/b/blob/main/x/%2E%2E/y",
