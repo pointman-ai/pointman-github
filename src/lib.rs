@@ -17,6 +17,8 @@
 //!           review_comments: [{author, body, created_at, path, line, url, in_reply_to}]} | null}
 //! ```
 
+pub mod install;
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -175,8 +177,9 @@ pub struct GitHub {
     gh: PathBuf,
 }
 
-/// Where `gh` is: the setting, else on the PATH, else where Homebrew puts it.
-pub fn find_gh(setting: &str) -> Option<PathBuf> {
+/// Where `gh` is: the setting, else on the PATH, else where Homebrew puts it, else the one this extension
+/// installed in its state folder.
+pub fn find_gh(setting: &str, state: Option<&Path>) -> Option<PathBuf> {
     if !setting.trim().is_empty() {
         return Some(PathBuf::from(setting.trim()));
     }
@@ -187,6 +190,7 @@ pub fn find_gh(setting: &str) -> Option<PathBuf> {
         .into_iter()
         .chain(["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"].map(PathBuf::from))
         .find(|p| p.is_file())
+        .or_else(|| state.and_then(install::installed))
 }
 
 /// An answer from GitHub that isn't a 200: 404 and its kin, as GitHub said.
