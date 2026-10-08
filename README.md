@@ -2,8 +2,7 @@
 
 What a GitHub link shows, for Pointman's viewer panel: a PR's or a commit's changed files with GitHub's
 unified diff of each, a file at a commit around its lines with how that file changed in its PR, and a PR's
-or an issue's conversation. A
-Pointman extension that runs on a node. Nothing of it is in core (James, Pointman thread 649 [4443]).
+or an issue's conversation. A Pointman extension that runs on a node. Nothing of it is in core (James, Pointman thread 649 [4443]).
 
 GitHub is asked with the machine's own `gh` login, so the viewer sees what that login sees. Install
 [GitHub's CLI](https://cli.github.com) and run `gh auth login` on the machine first. If `gh` isn't on the
@@ -38,14 +37,13 @@ The job's result (its `job.updated` event, or `GET /v1/workspaces/{ws}/jobs/{job
 - A PR or an issue link gives its conversation in `thread`: the description (`body`, markdown), its
   comments, and a PR's reviews (`state`: APPROVED, CHANGES_REQUESTED, COMMENTED…) and comments on lines,
   each oldest first, up to 300 of each. `in_reply_to` is the line comment it answers.
-
 - A PR or a commit link gives every changed file, up to 300. `patch` is GitHub's unified diff, or null
   when GitHub has none (a binary file, a very large change).
 - A file link (`https://github.com/o/r/blob/<ref>/<path>#L10-L20`) gives `lines`, the file's `text` (null
   for a binary file; `truncated` past 512 KB), its commit's PR in `pull`, and only that file's change in
   `files`.
-- A failed job says why: a link that isn't a PR, a commit, an issue or a file, or one GitHub doesn't show to the
-  machine's login. The apps then open the link on GitHub.
+- A failed job says why: a link that isn't a PR, a commit, an issue or a file, or one GitHub doesn't show
+  to the machine's login. The apps then open the link on GitHub.
 
 Answers are kept for a minute.
 
