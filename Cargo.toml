@@ -13,6 +13,7 @@ pointman-extension = { git = "https://github.com/pointman-ai/pointman-extension"
 regex = "1"
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
 ureq = { version = "2", features = ["json"] }
 
 [profile.release]

@@ -17,7 +17,24 @@ runtime = "binary"
 
 [permissions]
 network = true
-drives_apps = ["gh"]             # GitHub's CLI, signed in on this machine: GitHub is asked as that login
+drives_apps = ["gh"]             # GitHub's CLI: GitHub is asked as the vault's account, else this machine's login
+secrets = ["github.*"]           # each account's token, kept in the vault as github.<label>
+
+# agents' runs get the vault's token as GH_TOKEN, so `gh` works for them on every node
+[sessions]
+clients = ["claude", "codex"]
+env = ["GH_TOKEN"]
+
+# an account for every node: Sign in from the apps (GitHub's device flow), or paste a token
+[[credentials]]
+id = "account"
+title = "GitHub account"
+help = "Sign in, or paste a token: `gh auth token` on a machine signed in as the account, or a fine-grained token from github.com/settings/tokens."
+item = "github.{label}"
+value = "(gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{22,255})"
+placeholder = "github_pat_…"
+needed = 0                       # a machine signed in with gh already works without one
+sign_in = true
 
 [settings]
 type = "object"
@@ -26,6 +43,14 @@ type = "object"
 type = "string"
 default = ""
 description = "GitHub's CLI, when it isn't on the node's PATH or in /opt/homebrew/bin or /usr/local/bin; with none, the extension installs its own"
+
+[[commands]]
+kind = "github.add"
+title = "Add a GitHub account"
+params = { type = "object", properties = { name = { type = "string", description = "What to call it (work): lowercase letters, digits, . _ -" } } }
+slash = "add"
+form = "account"
+summary = "Add a GitHub account for every node: sign in, or paste a token"
 
 [[commands]]
 kind = "github.view"

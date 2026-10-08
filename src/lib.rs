@@ -18,6 +18,7 @@
 //! ```
 
 pub mod install;
+pub mod signin;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -162,6 +163,11 @@ pub fn parse(url: &str) -> anyhow::Result<Link> {
     Ok(Link { repo, kind: "file", reference, path, lines, url })
 }
 
+/// A GitHub token and nothing else: a classic or OAuth one (`gho_…`, `ghp_…`) or a fine-grained one.
+pub fn is_token(s: &str) -> bool {
+    Regex::new(r"^(gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{22,255})$").expect("compiles").is_match(s)
+}
+
 /// What the viewer calls a file's language, from its name.
 pub fn language(path: &str) -> Option<&'static str> {
     let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
@@ -175,6 +181,7 @@ pub fn language(path: &str) -> Option<&'static str> {
 /// GitHub as this machine's `gh` login sees it.
 pub struct GitHub {
     gh: PathBuf,
+    token: Option<String>,
 }
 
 /// Where `gh` is: the setting, else on the PATH, else where Homebrew puts it, else the one this extension
@@ -207,7 +214,13 @@ impl std::error::Error for NotThere {}
 
 impl GitHub {
     pub fn new(gh: impl AsRef<Path>) -> Self {
-        GitHub { gh: gh.as_ref().to_path_buf() }
+        GitHub { gh: gh.as_ref().to_path_buf(), token: None }
+    }
+
+    /// Ask as the vault's account (GH_TOKEN) rather than the machine's own gh login.
+    pub fn token(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
     }
 
     /// `gh api <path>`: the body as bytes, cut at `max`, and whether there was more.
@@ -216,6 +229,9 @@ impl GitHub {
         cmd.arg("api").arg(path);
         if raw {
             cmd.args(["-H", "Accept: application/vnd.github.raw"]);
+        }
+        if let Some(t) = &self.token {
+            cmd.env("GH_TOKEN", t);
         }
         let mut child = cmd
             .stdin(Stdio::null())
