@@ -55,6 +55,22 @@ The job's result (its `job.updated` event, or `GET /v1/workspaces/{ws}/jobs/{job
 
 Answers are kept for a minute.
 
+## The view pane
+
+The same, as a pane every app draws alike (Pointman's docs/dev/panes.md, MB-343), in place of the Mac's
+own viewer: `[[panes]] id = "view"`, opened with `{"url": "<a GitHub link>"}`.
+
+- A PR: a heading (repo, number, state, files and lines changed), then tabs: **Conversation**, a
+  `timeline` of the description, comments, reviews and comments on lines, oldest first, each by GitHub's
+  own anchor; and **Files**, a `diff`.
+- A commit: its `diff`. An issue: its `timeline`. A file: its `code` scrolled to the link's lines, and how
+  it changed in its PR.
+- A diff too big for a frame (1 MiB) leaves out its biggest files first, and a line says how many
+  GitHub's page has.
+- Each open pane asks GitHub again every minute and sends only what changed (the SDK's `show`), so a new
+  comment slides in and the open tab and scroll stay put. A tab's `select` is the app's; any other input
+  is refused with why.
+
 ## Building
 
 `cargo test` runs it against a stand-in node and a stand-in `gh`; `cargo test -- --ignored` asks the real

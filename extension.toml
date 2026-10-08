@@ -6,7 +6,7 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.1.0"
+version = "0.2.0"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and what a GitHub link shows in the apps' viewer: diffs, files, PR and issue threads."
 node = ">=0.1,<1"
