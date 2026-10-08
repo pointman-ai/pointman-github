@@ -167,3 +167,20 @@ fn the_real_github() {
     assert_eq!((v["kind"].as_str(), v["pull"]["number"].as_u64()), (Some("pull"), Some(8)), "{v}");
     assert!(v["thread"]["author"].is_string() && v["thread"]["comments"].is_array(), "{v}");
 }
+
+/// The real `gh` on this machine starts a sign-in: GitHub's link and a one-time code, which nobody enters
+/// here, so nothing is signed in. Run by hand: `cargo test --test github real_sign_in_starts -- --ignored`.
+#[test]
+#[ignore]
+fn real_sign_in_starts() {
+    let gh =
+        ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].into_iter().map(std::path::PathBuf::from).find(|p| p.exists());
+    let gh = gh.expect("gh on this machine");
+    let signins = github::signin::SignIns::default();
+    let got = signins.start(&gh, "s1", std::time::Duration::from_secs(30)).unwrap();
+    assert_eq!(got["url"], "https://github.com/login/device");
+    let prompt = got["prompt"].as_str().unwrap();
+    assert!(regex::Regex::new(r"^Enter [A-Z0-9]{4}-[A-Z0-9]{4} at ").unwrap().is_match(prompt), "{prompt}");
+    let wrong = signins.code(&gh, "s1", "AAAA-AAAA", std::time::Duration::from_secs(1)).unwrap_err().to_string();
+    assert!(wrong.starts_with("that isn't this sign-in's code"), "{wrong}");
+}

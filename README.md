@@ -1,16 +1,19 @@
 # github
 
-GitHub on Pointman's nodes, with nothing of it in core (James, Pointman thread 649 [4443], [4500], [4505]):
-GitHub's CLI on each node, installed where there's none, and what a GitHub link shows for the apps' viewer
-panel: a PR's or a commit's changed files with GitHub's unified diff of each, a file at a commit around its
-lines with how that file changed in its PR, and a PR's or an issue's conversation.
+GitHub on Pointman's machines (James, Pointman thread 649 [4443], [4500], [4505]): GitHub's CLI on each
+node, installed where there's none, GitHub accounts signed in from the apps and given to agents' runs, and
+what a GitHub link shows for the apps' viewer panel: a PR's or a commit's changed files with GitHub's
+unified diff of each, a file at a commit around its lines with how that file changed in its PR, and a PR's
+or an issue's conversation.
 
-Its id is `github`, which core's own GitHub App integration holds until it retires (MB-299, [4517]); the
-catalogue takes this one after that.
+It's the machine half of GitHub on Pointman. Pointman's GitHub App stays in core, for what GitHub sends as
+it happens: PR and CI feeds, `/github watch`, commit refs moving tasks, link pills and releases (James,
+[4670]–[4673]). Core's catalogue lets this repo alone take the id `github`, and the apps show the two as one
+GitHub: `/github watch` is core's, `/github add` this extension's.
 
-GitHub is asked with the machine's own `gh` login, so the viewer sees what that login sees. Install
-[GitHub's CLI](https://cli.github.com) and run `gh auth login` on the machine first. If `gh` isn't on the
-node's PATH, or in /opt/homebrew/bin or /usr/local/bin, set its path in the extension's `cli` setting.
+GitHub is asked with the vault's account (`/github add`), else the machine's own `gh` login, so the viewer
+sees what that account sees. If `gh` isn't on the node's PATH, or in /opt/homebrew/bin or /usr/local/bin,
+the extension installs its own; or set its path in the extension's `cli` setting.
 
 ```
 pointman add github

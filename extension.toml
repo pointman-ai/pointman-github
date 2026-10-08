@@ -1,7 +1,8 @@
-# GitHub on Pointman's nodes, with nothing of it in core (James, Pointman thread 649 [4443], [4500], [4505]):
-# GitHub's CLI on each node and the apps' GitHub viewer. The apps ask for a link through core's jobs
-# (POST /v1/workspaces/{ws}/jobs {kind: "github.view", params: {url}}) and draw the answer; GitHub is asked
-# with this machine's own `gh` login.
+# GitHub on Pointman's machines (James, Pointman thread 649 [4443], [4500], [4505]): GitHub's CLI on each
+# node, accounts for agents' runs, and the apps' GitHub viewer. The machine half of GitHub: Pointman's GitHub
+# App stays in core ([4670]–[4673]), and core's catalogue lets this repo alone take the id. The apps ask for
+# a link through core's jobs (POST /v1/workspaces/{ws}/jobs {kind: "github.view", params: {url}}) and draw
+# the answer; GitHub is asked with the vault's account, else this machine's own `gh` login.
 [extension]
 id = "github"
 name = "GitHub"
