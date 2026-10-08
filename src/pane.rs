@@ -3,7 +3,6 @@
 //! conversation and its files in tabs, a commit its files, a file at a commit its code around the lines
 //! with how it changed in its PR, and an issue its conversation.
 
-use pointman_extension::pointer;
 use serde_json::{json, Value};
 
 /// What a pane's content may come to: the stream's 1 MiB a frame, less room for the frame around it.
@@ -197,64 +196,6 @@ fn find_patches(v: &Value, at: String, out: &mut Vec<(String, usize)>) {
     }
 }
 
-/// What changed from one content of a pane to the next, as patches by id: a block's changed fields are
-/// set, and a list that only grew gets its new entries added at the end, so new comments slide in and the
-/// app keeps its tab and its scroll. None when the blocks themselves changed (added, gone or moved): send
-/// all of it.
-pub fn changes(old: &Value, new: &Value) -> Option<Vec<Value>> {
-    let mut ops = Vec::new();
-    same_blocks(old.as_array()?, new.as_array()?, &mut ops).then_some(ops)
-}
-
-fn same_blocks(old: &[Value], new: &[Value], ops: &mut Vec<Value>) -> bool {
-    old.len() == new.len()
-        && old.iter().zip(new).all(|(a, b)| a["id"] == b["id"] && a["type"] == b["type"])
-        && old.iter().zip(new).all(|(a, b)| same_block(a, b, ops))
-}
-
-fn same_block(old: &Value, new: &Value, ops: &mut Vec<Value>) -> bool {
-    let (Some(a), Some(b), Some(id)) = (old.as_object(), new.as_object(), new["id"].as_str()) else { return false };
-    let none = Vec::new();
-    for key in a.keys().chain(b.keys().filter(|k| !a.contains_key(*k))) {
-        let (before, after) = (a.get(key), b.get(key));
-        if before == after || key == "selected" {
-            continue; // which tab is open is the person's, in the app
-        }
-        let path = pointer(["b", id, key.as_str()]);
-        match (key.as_str(), before, after) {
-            ("children", Some(Value::Array(x)), Some(Value::Array(y))) => {
-                if !same_blocks(x, y, ops) {
-                    return false;
-                }
-            }
-            ("tabs", Some(Value::Array(x)), Some(Value::Array(y))) => {
-                if x.len() != y.len() || x.iter().zip(y).any(|(s, t)| s["id"] != t["id"]) {
-                    return false;
-                }
-                for (i, (s, t)) in x.iter().zip(y).enumerate() {
-                    if s["title"] != t["title"] {
-                        let at = pointer(["b", id, "tabs", &i.to_string(), "title"]);
-                        ops.push(json!({"op": "add", "path": at, "value": t["title"]}));
-                    }
-                    let children = |tab: &Value| tab["children"].as_array().unwrap_or(&none).clone();
-                    if !same_blocks(&children(s), &children(t), ops) {
-                        return false;
-                    }
-                }
-            }
-            (_, Some(Value::Array(x)), Some(Value::Array(y))) if y.len() > x.len() && y.starts_with(x) => {
-                for item in &y[x.len()..] {
-                    ops.push(json!({"op": "add", "path": format!("{path}/-"), "value": item}));
-                }
-            }
-            (_, _, Some(value)) => ops.push(json!({"op": "add", "path": path, "value": value})),
-            (_, Some(_), None) => ops.push(json!({"op": "remove", "path": path})),
-            (_, None, None) => {}
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,8 +279,10 @@ mod tests {
         assert_eq!(fit(b.clone(), 1_000_000), b);
     }
 
+    /// What the SDK's show sends when the thread grows: the new comment and the subtitle, in place.
     #[test]
     fn a_grown_thread_patches_in_place() {
+        use pointman_extension::changes;
         let old = blocks(&pull());
         let mut v = pull();
         v["thread"]["comments"].as_array_mut().unwrap().push(json!({"author": "cairn", "body": "Merging",

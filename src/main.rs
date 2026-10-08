@@ -146,26 +146,26 @@ fn main() -> anyhow::Result<()> {
         view(&hh, &v, &k, &link, false)
     });
 
-    // the `view` pane: the same, as blocks (Pointman's docs/dev/panes.md), each open one's last content
-    // kept so a refresh sends only what changed
-    let shown: Arc<Mutex<HashMap<String, Value>>> = Arc::default();
-    let (hh, v, k, s) = (h.clone(), vault.clone(), kept.clone(), shown.clone());
+    // the `view` pane: the same, as blocks (Pointman's docs/dev/panes.md), asked again each minute; show
+    // sends only what changed, so a new comment slides in and the open tab stays put
+    let titles: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+    let (hh, v, k, t) = (h.clone(), vault.clone(), kept.clone(), titles.clone());
     ext.pane("view", move |p: &Pane| {
         let url = p.target()["url"].as_str().context("the GitHub view opens a GitHub link: its target has no url")?;
         let got = view(&hh, &v, &k, &parse(url)?, false)?;
-        let content = pane::blocks(&got);
-        s.lock().unwrap_or_else(|e| e.into_inner()).insert(p.id().to_string(), content.clone());
+        let title = pane::title(&got);
+        t.lock().unwrap_or_else(|e| e.into_inner()).insert(p.id().to_string(), title.clone());
         p.on_input(|_: &Pane, event: &Value| -> anyhow::Result<()> {
             match event["kind"].as_str().unwrap_or_default() {
                 "select" => Ok(()), // a tab: the app shows it
                 kind => Err(Refused::new(format!("the GitHub view has nothing to do for {kind}")).into()),
             }
         });
-        let s = s.clone();
+        let t = t.clone();
         p.on_close(move |p: &Pane, _: &str| {
-            s.lock().unwrap_or_else(|e| e.into_inner()).remove(p.id());
+            t.lock().unwrap_or_else(|e| e.into_inner()).remove(p.id());
         });
-        Ok(json!({"title": pane::title(&got), "blocks": content}))
+        Ok(json!({"title": title, "blocks": pane::blocks(&got)}))
     });
     let (v, k) = (vault, kept);
     ext.every(
@@ -173,25 +173,17 @@ fn main() -> anyhow::Result<()> {
         move |h: &Handle| {
             for p in h.panes("view") {
                 let Ok(link) = parse(p.target()["url"].as_str().unwrap_or_default()) else { continue };
-                let got = match view(h, &v, &k, &link, true) {
-                    Ok(got) => got,
-                    Err(e) => {
-                        h.log(format!("pane {}: couldn't ask GitHub again: {e:#}", p.id()));
-                        continue;
+                match view(h, &v, &k, &link, true) {
+                    Ok(got) => {
+                        p.show(pane::blocks(&got));
+                        let title = pane::title(&got);
+                        let mut titles = titles.lock().unwrap_or_else(|e| e.into_inner());
+                        if titles.get(p.id()) != Some(&title) && p.is_open() {
+                            p.set_title(&title);
+                            titles.insert(p.id().to_string(), title);
+                        }
                     }
-                };
-                let new = pane::blocks(&got);
-                let mut shown = shown.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(old) = shown.get(p.id()) else { continue }; // still opening, or closed
-                if *old == new {
-                    continue;
-                }
-                match pane::changes(old, &new) {
-                    Some(ops) => p.patch(ops),
-                    None => p.set(&new),
-                }
-                if p.closed().is_none() {
-                    shown.insert(p.id().to_string(), new);
+                    Err(e) => h.log(format!("pane {}: couldn't ask GitHub again: {e:#}", p.id())),
                 }
             }
         },
