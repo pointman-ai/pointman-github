@@ -57,3 +57,11 @@ summary = "Add a GitHub account for every node: sign in, or paste a token"
 kind = "github.view"
 title = "What a GitHub link shows"
 params = { type = "object", required = ["url"], properties = { url = { type = "string", description = "A PR, a commit, or a file at a commit (#L10-L20 for lines)" } } }
+
+# what a GitHub link shows, as a pane in the apps (Pointman's docs/dev/panes.md): a PR's conversation and
+# files, a commit's files, a file's code and how it changed, an issue's conversation; asked again each minute
+[[panes]]
+id = "view"
+title = "GitHub"
+format = "blocks"
+opens = ["link", "command"]

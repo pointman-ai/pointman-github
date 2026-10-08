@@ -184,3 +184,55 @@ fn real_sign_in_starts() {
     let wrong = signins.code(&gh, "s1", "AAAA-AAAA", std::time::Duration::from_secs(1)).unwrap_err().to_string();
     assert!(wrong.starts_with("that isn't this sign-in's code"), "{wrong}");
 }
+
+fn node() -> StandIn {
+    StandIn::new(env!("CARGO_MANIFEST_DIR"))
+        .binary(env!("CARGO_BIN_EXE_github"))
+        .settings(json!({"cli": fake_gh().to_string_lossy()}))
+        .start()
+        .unwrap()
+}
+
+#[test]
+fn a_pr_opens_as_a_pane_of_its_conversation_and_files() {
+    let node = node();
+    let view = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/42"})).unwrap();
+    assert_eq!(view.format().as_deref(), Some("blocks"));
+    assert_eq!(view.title().as_deref(), Some("PR 42 · Fix the thing"));
+    assert_eq!(view.block("head").unwrap()["subtitle"], "a/b · PR #42 · merged · 2 files, +2 −1");
+    let events = view.block("timeline").unwrap()["events"].clone();
+    let who: Vec<&str> = events.as_array().unwrap().iter().map(|e| e["who"].as_str().unwrap()).collect();
+    assert_eq!(who, ["patchbay", "james", "loupe", "loupe"]);
+    let diff = view.block("diff").unwrap();
+    assert_eq!(diff["files"][0]["path"], "src/my file.py");
+    assert_eq!(diff["files"][1]["previous_path"], "old.png");
+    // a tab is the app's to show; anything else has nothing to do here
+    view.input(json!({"kind": "select", "block": "tabs", "value": "files"})).unwrap();
+    let refused = view.input(json!({"kind": "tap", "block": "diff"})).unwrap_err();
+    assert_eq!(refused.message, "the GitHub view has nothing to do for tap");
+    assert!(view.problems().is_empty(), "{:?}", view.problems());
+}
+
+#[test]
+fn a_file_and_an_issue_open_as_panes() {
+    let node = node();
+    let file =
+        node.open_pane("view", json!({"url": "https://github.com/a/b/blob/c8b3559/src/my%20file.py#L2"})).unwrap();
+    assert_eq!(file.title().as_deref(), Some("my file.py @ c8b3559"));
+    let code = file.block("code").unwrap();
+    assert_eq!((code["text"].as_str(), code["lines"].clone()), (Some("line one\nline two\n"), json!([2, 2])));
+    assert_eq!(file.block("changed").unwrap()["text"], "How it changed in PR 42");
+    let issue = node.open_pane("view", json!({"url": "https://github.com/a/b/issues/9"})).unwrap();
+    assert_eq!(issue.title().as_deref(), Some("Issue 9 · It broke"));
+    assert_eq!(issue.block("timeline").unwrap()["events"][0]["markdown"], "Steps");
+    assert!(file.problems().is_empty() && issue.problems().is_empty());
+}
+
+#[test]
+fn a_pane_that_cant_open_says_why() {
+    let node = node();
+    let missing = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/7"})).err().unwrap();
+    assert_eq!(missing.message, "GitHub doesn't show that PR to this machine's gh login");
+    let no_url = node.open_pane("view", json!({"item": "MB-286"})).err().unwrap();
+    assert_eq!(no_url.message, "the GitHub view opens a GitHub link: its target has no url");
+}

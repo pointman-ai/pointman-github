@@ -18,6 +18,7 @@
 //! ```
 
 pub mod install;
+pub mod pane;
 pub mod signin;
 
 use std::collections::HashMap;
