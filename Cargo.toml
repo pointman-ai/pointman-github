@@ -1,10 +1,10 @@
 [package]
-name = "gh"
+name = "github"
 version = "0.1.0"
 edition = "2021"
 description = "GitHub on Pointman's nodes: the apps' GitHub viewer, from the machine's gh login."
 license = "MIT"
-repository = "https://github.com/pointman-ai/pointman-gh"
+repository = "https://github.com/pointman-ai/pointman-github"
 publish = false
 
 [dependencies]

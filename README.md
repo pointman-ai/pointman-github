@@ -1,16 +1,19 @@
-# gh
+# github
 
-GitHub on Pointman's nodes (James, Pointman thread 649 [4500], [4505]: the GitHub integration lives on
-nodes and in the apps, not in core). Today: what a GitHub link shows, for the apps' viewer panel: a PR's or a commit's changed files with GitHub's
-unified diff of each, a file at a commit around its lines with how that file changed in its PR, and a PR's
-or an issue's conversation. A Pointman extension that runs on a node. Nothing of it is in core (James, Pointman thread 649 [4443]).
+GitHub on Pointman's nodes, with nothing of it in core (James, Pointman thread 649 [4443], [4500], [4505]):
+GitHub's CLI on each node, installed where there's none, and what a GitHub link shows for the apps' viewer
+panel: a PR's or a commit's changed files with GitHub's unified diff of each, a file at a commit around its
+lines with how that file changed in its PR, and a PR's or an issue's conversation.
+
+Its id is `github`, which core's own GitHub App integration holds until it retires (MB-299, [4517]); the
+catalogue takes this one after that.
 
 GitHub is asked with the machine's own `gh` login, so the viewer sees what that login sees. Install
 [GitHub's CLI](https://cli.github.com) and run `gh auth login` on the machine first. If `gh` isn't on the
 node's PATH, or in /opt/homebrew/bin or /usr/local/bin, set its path in the extension's `cli` setting.
 
 ```
-pointman add gh
+pointman add github
 ```
 
 ## The apps' call
@@ -18,7 +21,7 @@ pointman add gh
 Through core's jobs, as for any extension's command:
 
 ```
-POST /v1/workspaces/{ws}/jobs  {"kind": "gh.view", "params": {"url": "<a GitHub link>"}}
+POST /v1/workspaces/{ws}/jobs  {"kind": "github.view", "params": {"url": "<a GitHub link>"}}
 ```
 
 The job's result (its `job.updated` event, or `GET /v1/workspaces/{ws}/jobs/{job}`):

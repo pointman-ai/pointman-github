@@ -35,7 +35,7 @@ pub fn installed(state: &Path) -> Option<PathBuf> {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).user_agent("pointman-gh").build()
+    ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).user_agent("pointman-github").build()
 }
 
 fn bytes(url: &str, max: u64) -> anyhow::Result<Vec<u8>> {
@@ -131,7 +131,7 @@ mod real {
     #[test]
     #[ignore]
     fn installs_the_latest_gh() {
-        let dir = std::env::temp_dir().join(format!("pointman-gh-install-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pointman-github-install-{}", std::process::id()));
         let (gh, version) = super::install(&dir).unwrap();
         let out = std::process::Command::new(&gh).arg("--version").output().unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains(&version), "{out:?}");

@@ -1,12 +1,12 @@
-//! The extension's process: the node starts it (`bin/gh`, from the extension's folder) and talks to it
-//! over stdin and stdout. It installs GitHub's CLI where there's none, and `gh.view {url}` answers with
+//! The extension's process: the node starts it (`bin/github`, from the extension's folder) and talks to it
+//! over stdin and stdout. It installs GitHub's CLI where there's none, and `github.view {url}` answers with
 //! what a GitHub link shows.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use gh::{find_gh, install, parse, GitHub, Kept};
+use github::{find_gh, install, parse, GitHub, Kept};
 use pointman_extension::{Extension, Handle, Job};
 
 fn state(h: &Handle) -> PathBuf {
@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    ext.command("gh.view", move |job: &Job| {
+    ext.command("github.view", move |job: &Job| {
         let link = parse(job.params["url"].as_str().context("url is missing")?)?;
         if let Some(v) = kept.get(&link) {
             return Ok(v);
