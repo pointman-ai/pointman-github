@@ -3,12 +3,19 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use pointman_extension::testing::StandIn;
 use serde_json::{json, Value};
 
-/// A `gh` that answers `gh api <path>` from a few canned bodies, and 404 for anything else.
+/// A `gh` that answers `gh api <path>` from a few canned bodies, and 404 for anything else. Written once:
+/// one test writing it while another runs it is "text file busy" on Linux.
 fn fake_gh() -> PathBuf {
+    static GH: OnceLock<PathBuf> = OnceLock::new();
+    GH.get_or_init(write_gh).clone()
+}
+
+fn write_gh() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("gitview-gh-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let pull = json!({"number": 42, "title": "Fix the thing", "state": "open", "draft": false, "merged": true,
