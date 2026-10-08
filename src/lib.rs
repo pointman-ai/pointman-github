@@ -14,7 +14,7 @@
 //!  thread: {author, body, created_at, url,                      // a PR's or an issue's, else null
 //!           comments: [{author, body, created_at, url}],
 //!           reviews: [{author, state, body, submitted_at, url}],  // a PR's
-//!           review_comments: [{author, body, created_at, path, line, url, in_reply_to}]} | null}
+//!           review_comments: [{author, body, created_at, path, line, url, in_reply_to, review_id}]} | null}
 //! ```
 
 pub mod install;
@@ -339,7 +339,8 @@ impl GitHub {
             "review_comments": on_lines.iter().map(|c| json!({
                 "author": c["user"]["login"], "body": c["body"], "created_at": c["created_at"], "path": c["path"],
                 "line": if c["line"].is_null() { c["original_line"].clone() } else { c["line"].clone() },
-                "url": c["html_url"], "in_reply_to": c.get("in_reply_to_id").cloned().unwrap_or(Value::Null)}))
+                "url": c["html_url"], "in_reply_to": c.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
+                "review_id": c.get("pull_request_review_id").cloned().unwrap_or(Value::Null)}))
                 .collect::<Vec<_>>(),
         }))
     }

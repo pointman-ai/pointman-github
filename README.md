@@ -35,12 +35,13 @@ The job's result (its `job.updated` event, or `GET /v1/workspaces/{ws}/jobs/{job
  thread: {author, body, created_at, url,          // a PR's or an issue's, else null
           comments: [{author, body, created_at, url}],
           reviews: [{author, state, body, submitted_at, url}],            // a PR's
-          review_comments: [{author, body, created_at, path, line, url, in_reply_to}]} | null}
+          review_comments: [{author, body, created_at, path, line, url, in_reply_to, review_id}]} | null}
 ```
 
 - A PR or an issue link gives its conversation in `thread`: the description (`body`, markdown), its
   comments, and a PR's reviews (`state`: APPROVED, CHANGES_REQUESTED, COMMENTED…) and comments on lines,
-  each oldest first, up to 300 of each. `in_reply_to` is the line comment it answers.
+  each oldest first, up to 300 of each. `in_reply_to` is the line comment it answers
+  (the id in its url's `#discussion_r<id>`), `review_id` the review it was made in (`#pullrequestreview-<id>`).
 - A PR or a commit link gives every changed file, up to 300. `patch` is GitHub's unified diff, or null
   when GitHub has none (a binary file, a very large change).
 - A file link (`https://github.com/o/r/blob/<ref>/<path>#L10-L20`) gives `lines`, the file's `text` (null

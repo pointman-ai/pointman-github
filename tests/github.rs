@@ -27,6 +27,7 @@ fn write_gh() -> PathBuf {
                           "html_url": "https://github.com/a/b/pull/42#pullrequestreview-2"}]);
     let on_lines = json!([{"user": {"login": "loupe"}, "body": "Why this?", "created_at": "2026-10-08T01:30:00Z",
                            "path": "src/my file.py", "line": null, "original_line": 3, "in_reply_to_id": 5,
+                           "pull_request_review_id": 2,
                            "html_url": "https://github.com/a/b/pull/42#discussion_r3"}]);
     let issue = json!({"number": 9, "title": "It broke", "state": "open", "user": {"login": "james"}, "body": "Steps",
                        "created_at": "2026-10-07T00:00:00Z", "html_url": "https://github.com/a/b/issues/9"});
@@ -101,8 +102,8 @@ fn a_pull_request_with_its_files() {
     );
     let c = &t["review_comments"][0];
     assert_eq!(
-        (c["path"].as_str(), c["line"].as_u64(), c["in_reply_to"].as_u64()),
-        (Some("src/my file.py"), Some(3), Some(5))
+        (c["path"].as_str(), c["line"].as_u64(), c["in_reply_to"].as_u64(), c["review_id"].as_u64()),
+        (Some("src/my file.py"), Some(3), Some(5), Some(2))
     );
 }
 
