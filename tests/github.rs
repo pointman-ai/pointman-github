@@ -563,3 +563,22 @@ fn real_page() {
     println!("issue: {:?}", line(&view));
     assert!(view.problems().is_empty(), "{:?}", view.problems());
 }
+
+/// Agents' runs get the vault's token, and the vault's list is kept: two runs starting together ask for it
+/// once (each ask is a round trip to core that a run's start waited on).
+#[test]
+fn runs_get_the_vaults_token_and_its_list_is_kept() {
+    let token = format!("ghp_{}", "a1".repeat(18));
+    let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
+        .binary(env!("CARGO_BIN_EXE_github"))
+        .settings(json!({"cli": fake_gh().to_string_lossy()}))
+        .secret("github.work", format!("token: {token}"))
+        .start()
+        .unwrap();
+    for _ in 0..2 {
+        let got = node.call("session.prepare", json!({"client": "claude", "handle": "scene"})).unwrap();
+        assert_eq!(got, json!({"env": {"GH_TOKEN": token}}));
+    }
+    let asked: Vec<String> = node.asked().into_iter().map(|(method, _)| method).collect();
+    assert_eq!(asked, ["secret.list", "secret.get"], "listed and opened once");
+}

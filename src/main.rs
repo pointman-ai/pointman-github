@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,10 @@ use pointman_extension::{Extension, Handle, Job, Pane, Refused};
 use regex::Regex;
 use serde_json::{json, Value};
 
-/// How often the vault's github.* names are looked at, and how long an opened token is kept.
+/// How often the vault's github.* names are looked at, and how long an opened token is kept. A list older
+/// than LIST_EVERY is still used while it's asked for again behind (each ask is a round trip to core, 0.2 s
+/// from the Mac, that a run's start or a pane's open waited on: Pointman thread 6216); one older than
+/// OPEN_EVERY is asked for first.
 const LIST_EVERY: Duration = Duration::from_secs(60);
 const OPEN_EVERY: Duration = Duration::from_secs(1800);
 /// How often an open `view` pane asks GitHub again.
@@ -37,21 +41,66 @@ fn cli(h: &Handle) -> Option<PathBuf> {
 struct Vault {
     listed: Option<Instant>,
     names: Vec<String>,
+    /// The list being asked for behind, None in it if the node couldn't say.
+    asking: Option<Receiver<Option<Vec<String>>>>,
     opened: Option<(Instant, String, Option<String>)>,
+}
+
+/// What's done about the vault's list, from its age and whether it's being asked for already.
+#[derive(Debug, PartialEq)]
+enum Relist {
+    Now,
+    Behind,
+    Kept,
+}
+
+fn relist(age: Option<Duration>, asking: bool) -> Relist {
+    match age {
+        None => Relist::Now,
+        Some(age) if age > OPEN_EVERY => Relist::Now,
+        Some(age) if age > LIST_EVERY && !asking => Relist::Behind,
+        Some(_) => Relist::Kept,
+    }
+}
+
+fn list(h: &Handle) -> Option<Vec<String>> {
+    let got = h.request("secret.list", json!({"prefix": "github."})).ok()?;
+    let mut names: Vec<String> = got["names"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .unwrap_or_default();
+    names.sort();
+    Some(names)
 }
 
 impl Vault {
     fn token(&mut self, h: &Handle) -> Option<String> {
-        if self.listed.is_none_or(|t| t.elapsed() > LIST_EVERY) {
-            self.listed = Some(Instant::now());
-            if let Ok(got) = h.request("secret.list", json!({"prefix": "github."})) {
-                let mut names: Vec<String> = got["names"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
-                    .unwrap_or_default();
-                names.sort();
-                self.names = names;
+        if let Some(asking) = &self.asking {
+            match asking.try_recv() {
+                Ok(got) => {
+                    self.names = got.unwrap_or_else(|| self.names.clone());
+                    self.asking = None;
+                }
+                Err(TryRecvError::Disconnected) => self.asking = None,
+                Err(TryRecvError::Empty) => {}
             }
+        }
+        match relist(self.listed.map(|t| t.elapsed()), self.asking.is_some()) {
+            Relist::Now => {
+                self.listed = Some(Instant::now());
+                self.asking = None;
+                if let Some(names) = list(h) {
+                    self.names = names;
+                }
+            }
+            Relist::Behind => {
+                self.listed = Some(Instant::now());
+                let (tx, rx) = mpsc::channel();
+                self.asking = Some(rx);
+                let h = h.clone();
+                std::thread::spawn(move || tx.send(list(&h)));
+            }
+            Relist::Kept => {}
         }
         let name = self.names.first()?.clone();
         if let Some((at, n, token)) = &self.opened {
@@ -289,4 +338,19 @@ fn main() -> anyhow::Result<()> {
     );
 
     ext.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_vaults_list_is_asked_for_first_then_behind_and_first_again_when_too_old() {
+        let secs = |s: u64| Some(Duration::from_secs(s));
+        assert_eq!(relist(None, false), Relist::Now);
+        assert_eq!(relist(secs(10), false), Relist::Kept);
+        assert_eq!(relist(secs(61), false), Relist::Behind);
+        assert_eq!(relist(secs(61), true), Relist::Kept, "asked for once");
+        assert_eq!(relist(secs(1801), true), Relist::Now);
+    }
 }
