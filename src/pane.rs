@@ -100,7 +100,7 @@ pub fn actions(view: &Value) -> Vec<Value> {
         "BLOCKED" => format!("blocked from `{base}` by a required review or check"),
         "BEHIND" => format!("behind `{base}`: update the branch first"),
         "DIRTY" => format!("conflicts with `{base}`: resolve them on GitHub"),
-        "DRAFT" => "a draft: mark it ready on GitHub".to_string(),
+        "DRAFT" => "a draft".to_string(),
         _ => "GitHub is still working out whether it can merge".to_string(),
     };
     let viewer = m["viewer"].as_str().unwrap_or("this machine's login");
@@ -112,16 +112,39 @@ pub fn actions(view: &Value) -> Vec<Value> {
     if !authored && m["my_review"] != "APPROVED" {
         buttons.push(json!({"id": "approve", "title": "Approve", "tone": "good"}));
     }
-    if m["can_merge"] == true && m["draft"] != true && state != "DIRTY" {
-        let tone = if matches!(state, "CLEAN" | "HAS_HOOKS") { "good" } else { "warn" };
+    // a merge for a login that may (GitHub has the last word on what it may bypass), unless it conflicts,
+    // which nothing merges; a forced one overrides what stands in its way, and says what, first
+    if m["can_merge"] == true && state != "DIRTY" {
+        let draft = m["draft"] == true;
+        let mut against = vec![];
+        if draft {
+            against.push("it's a draft (it's marked ready first)".to_string());
+        }
+        match state {
+            "BLOCKED" => against.push("a required review or check is missing".to_string()),
+            "BEHIND" => against.push(format!("it's behind {base}")),
+            _ => {}
+        }
+        if count("failed") > 0 {
+            against.push(format!("{} check{} failed", count("failed"), if count("failed") == 1 { "" } else { "s" }));
+        }
+        let forced = !against.is_empty();
         for method in m["methods"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-            let (title, how) = match method {
-                "squash" => ("Squash and merge", "squashed into one commit"),
-                "rebase" => ("Rebase and merge", "rebased"),
-                _ => ("Merge", "with a merge commit"),
+            let (title, forced_title, how) = match method {
+                "squash" => ("Squash and merge", "Force squash", "squashed into one commit"),
+                "rebase" => ("Rebase and merge", "Force rebase", "rebased"),
+                _ => ("Merge", "Force merge", "with a merge commit"),
             };
-            buttons.push(json!({"id": format!("merge:{method}"), "title": title, "tone": tone,
-                                "confirm": format!("Merge PR #{number} into {base}, {how}, as {viewer}?")}));
+            let button = if forced {
+                json!({"id": format!("merge:{method}"), "title": forced_title, "tone": "bad",
+                       "confirm": format!("Force-merge PR #{number} into {base}, {how}, as {viewer}, though {}?",
+                                          against.join(" and "))})
+            } else {
+                json!({"id": format!("merge:{method}"), "title": title,
+                       "tone": if matches!(state, "CLEAN" | "HAS_HOOKS") { "good" } else { "warn" },
+                       "confirm": format!("Merge PR #{number} into {base}, {how}, as {viewer}?")})
+            };
+            buttons.push(button);
         }
     }
     if !buttons.is_empty() {
@@ -379,14 +402,31 @@ mod tests {
             "**Checks** 3 passed, 1 failing · **Review** approved · can merge into `production`, though not every \
              check passed. Acting as **james**."
         );
-        // already approved by this login: only the merge, which warns while a check fails
+        // already approved by this login: only the merge, forced past the failing check, which it names
         assert_eq!(
             b[2]["buttons"],
-            json!([{"id": "merge:squash", "title": "Squash and merge", "tone": "warn",
-                    "confirm": "Merge PR #42 into production, squashed into one commit, as james?"}])
+            json!([{"id": "merge:squash", "title": "Force squash", "tone": "bad",
+                    "confirm": "Force-merge PR #42 into production, squashed into one commit, as james, though 1 check failed?"}])
         );
-        // conflicts, a draft, or no right to merge: no merge buttons
-        for (field, value) in [("state", json!("DIRTY")), ("draft", json!(true)), ("can_merge", json!(false))] {
+        // a draft that's blocked: forced too, saying both
+        v["merge"] = merge("BLOCKED");
+        v["merge"]["draft"] = json!(true);
+        v["merge"]["checks"]["failed"] = json!(0);
+        assert_eq!(
+            actions(&v)[1]["buttons"][0]["confirm"],
+            "Force-merge PR #42 into production, squashed into one commit, as james, though it's a draft (it's marked \
+             ready first) and a required review or check is missing?"
+        );
+        // ready, with nothing in its way: a plain merge
+        v["merge"] = merge("CLEAN");
+        v["merge"]["checks"]["failed"] = json!(0);
+        assert_eq!(
+            actions(&v)[1]["buttons"][0],
+            json!({"id": "merge:squash", "title": "Squash and merge", "tone": "good",
+                   "confirm": "Merge PR #42 into production, squashed into one commit, as james?"})
+        );
+        // conflicts, or no right to merge: no merge buttons
+        for (field, value) in [("state", json!("DIRTY")), ("can_merge", json!(false))] {
             v["merge"] = merge("CLEAN");
             v["merge"][field] = value;
             assert!(actions(&v).iter().all(|x| x["id"] != "pr-actions"), "{field}");

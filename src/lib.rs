@@ -411,8 +411,24 @@ impl GitHub {
         Ok(())
     }
 
+    /// Marks a draft PR (by its GraphQL id) ready for review: a draft can't merge.
+    pub fn ready(&self, pr_id: &str) -> anyhow::Result<()> {
+        let query = "query=mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { \
+                     pullRequest { isDraft } } }";
+        let id = format!("id={pr_id}");
+        let (out, _) = self
+            .call_with("graphql", &["-f", query, "-f", &id], None, false, 1 << 20)
+            .map_err(|e| anyhow::anyhow!(said(&e)))?;
+        let got: Value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+        if let Some(e) = got["errors"][0]["message"].as_str() {
+            bail!("{e}");
+        }
+        Ok(())
+    }
+
     /// Merges a PR as this login, only while its head is still `sha` (what was shown), by `method`: merge,
-    /// squash or rebase.
+    /// squash or rebase. A login that may bypass the repo's rules (an admin, unless they bind admins too)
+    /// merges a blocked PR or one whose checks failed this way as well: GitHub decides.
     pub fn merge(&self, repo: &str, number: u64, method: &str, sha: &str) -> anyhow::Result<()> {
         if !matches!(method, "merge" | "squash" | "rebase") {
             bail!("{method} isn't a way to merge: merge, squash or rebase");
@@ -504,7 +520,7 @@ impl GitHub {
 /// permission, and the PR's mergeability, review decision and its head's checks.
 const MERGE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { viewer { login } \
     repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission \
-    pullRequest(number: $number) { mergeable mergeStateStatus reviewDecision isDraft viewerDidAuthor baseRefName \
+    pullRequest(number: $number) { id mergeable mergeStateStatus reviewDecision isDraft viewerDidAuthor baseRefName \
     viewerLatestReview { state } commits(last: 1) { nodes { commit { oid statusCheckRollup { state \
     contexts(first: 100) { nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }";
 
@@ -540,7 +556,7 @@ pub fn merge_of(data: &Value) -> Value {
         }
     }
     json!({
-        "viewer": data["viewer"]["login"], "methods": methods,
+        "viewer": data["viewer"]["login"], "id": pr["id"], "methods": methods,
         "can_merge": matches!(repo["viewerPermission"].as_str(), Some("ADMIN" | "MAINTAIN" | "WRITE")),
         "mergeable": pr["mergeable"], "state": pr["mergeStateStatus"], "review": pr["reviewDecision"],
         "draft": pr["isDraft"], "authored": pr["viewerDidAuthor"], "my_review": pr["viewerLatestReview"]["state"],
@@ -638,7 +654,7 @@ mod tests {
     fn a_merge_status_and_githubs_reasons() {
         let data = json!({"viewer": {"login": "james"}, "repository": {
             "mergeCommitAllowed": true, "squashMergeAllowed": false, "rebaseMergeAllowed": true, "viewerPermission": "WRITE",
-            "pullRequest": {"mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
+            "pullRequest": {"id": "PR_1", "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
                             "isDraft": false, "viewerDidAuthor": true, "baseRefName": "main", "viewerLatestReview": {"state": "COMMENTED"},
                             "commits": {"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {"state": "PENDING", "contexts": {"nodes": [
                                 {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SKIPPED"},
@@ -647,7 +663,7 @@ mod tests {
                                 {"__typename": "StatusContext", "state": "ERROR"}]}}}}]}}}});
         assert_eq!(
             merge_of(&data),
-            json!({"viewer": "james", "methods": ["merge", "rebase"], "can_merge": true, "mergeable": "MERGEABLE",
+            json!({"viewer": "james", "id": "PR_1", "methods": ["merge", "rebase"], "can_merge": true, "mergeable": "MERGEABLE",
                    "state": "BLOCKED", "review": "REVIEW_REQUIRED", "draft": false, "authored": true, "my_review": "COMMENTED",
                    "base": "main", "head": "abc", "checks": {"state": "PENDING", "passed": 1, "failed": 2, "pending": 1}})
         );

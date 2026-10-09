@@ -125,7 +125,15 @@ fn act(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, titles: &Titles, p: &Pane,
     let value = &event["value"];
     let done = match (kind, value.as_str()) {
         ("tap", Some("approve")) => github.review(&link.repo, number, "APPROVE", "", &sha),
-        ("tap", Some(b)) if b.starts_with("merge:") => github.merge(&link.repo, number, &b["merge:".len()..], &sha),
+        ("tap", Some(b)) if b.starts_with("merge:") => {
+            // a forced merge of a draft marks it ready first: GitHub merges no draft
+            let merge = &shown_now["merge"];
+            let ready = match merge["id"].as_str() {
+                Some(id) if merge["draft"] == true => github.ready(id),
+                _ => Ok(()),
+            };
+            ready.and_then(|_| github.merge(&link.repo, number, &b["merge:".len()..], &sha))
+        }
         ("submit", _) => {
             let kind = value["event"].as_str().unwrap_or("COMMENT");
             let body = value["body"].as_str().unwrap_or_default();

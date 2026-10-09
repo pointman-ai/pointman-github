@@ -71,8 +71,11 @@ own viewer: `[[panes]] id = "view"`, opened with `{"url": "<a GitHub link>"}`.
   whether it can merge into its base (GitHub's merge state), and the login that acts. Under that:
   - `pr-actions`: **Approve** (not on the login's own PR, which GitHub refuses, nor once it's approved),
     and a button per merge method the repo allows (**Merge**, **Squash and merge**, **Rebase and merge**),
-    for a login that may merge, unless it's a draft or conflicts. Merging asks first, saying into which
-    branch, how and as whom.
+    for a login that may merge, unless it conflicts (nothing merges that). Merging asks first, saying into
+    which branch, how and as whom. When something stands in the way (a draft, a missing required review
+    or check, a failed check, a base it's behind), the buttons are **Force merge** (red), and the question
+    says what they override: a draft is marked ready first, and GitHub lets a login that may bypass the
+    repo's rules (an admin, unless the rules bind admins too) merge past the rest, or says why not.
   - `pr-review`: a review with words: Comment, Approve or Request changes (only Comment on one's own PR).
   - A tap or a submit goes to GitHub as this machine's login (the vault's account, else its own gh
     login), on the head the pane showed: a merge never takes a commit pushed since. The pane shows

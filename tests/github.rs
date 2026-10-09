@@ -58,28 +58,39 @@ case "$2" in
 esac
 "#
     );
-    // PRs 43–46, open, for the pane's buttons and review form: 44 is the login's own, 45 merges (and is
-    // merged after), 46 can't merge; what's sent is logged in calls.log beside gh
-    let merge = |n: u64, authored: bool| {
+    // PRs 43–47, open, for the pane's buttons and review form: 44 is the login's own, 45 merges (and is
+    // merged after), 46 can't merge, 47 is a draft; what's sent is logged in calls.log beside gh
+    let merge = |n: u64, authored: bool, draft: bool| {
         json!({"data": {"viewer": {"login": "james"}, "repository": {"mergeCommitAllowed": true,
                "squashMergeAllowed": false, "rebaseMergeAllowed": true, "viewerPermission": "ADMIN",
-               "pullRequest": {"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "REVIEW_REQUIRED",
-                               "isDraft": false, "viewerDidAuthor": authored, "baseRefName": "main", "viewerLatestReview": null,
+               "pullRequest": {"id": format!("PR_{n}"), "mergeable": "MERGEABLE",
+                               "mergeStateStatus": if draft { "DRAFT" } else { "CLEAN" }, "reviewDecision": "REVIEW_REQUIRED",
+                               "isDraft": draft, "viewerDidAuthor": authored, "baseRefName": "main", "viewerLatestReview": null,
                                "commits": {"nodes": [{"commit": {"oid": format!("d{n}"), "statusCheckRollup": {"state": "SUCCESS",
                                    "contexts": {"nodes": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
                                                           {"__typename": "StatusContext", "state": "PENDING"}]}}}}]}}}}})
     };
     let open_prs = format!(
         r#"  graphql)
+    case "$*" in
+      *markPullRequestReadyForReview*)
+        printf 'READY %s\n' "$(printf '%s\n' "$@" | sed -n 's/^id=//p')" >> "$here/calls.log"
+        printf '%s\n' '{{"data": {{"markPullRequestReadyForReview": {{"pullRequest": {{"isDraft": false}}}}}}}}'
+        exit 0 ;;
+    esac
     n=$(printf '%s\n' "$@" | sed -n 's/^number=//p')
-    [ "$n" = 44 ] && printf '%s\n' '{own}' || printf '%s\n' '{other}' | sed "s/\"d43\"/\"d$n\"/" ;;
-  repos/a/b/pulls/43|repos/a/b/pulls/44|repos/a/b/pulls/45|repos/a/b/pulls/46)
+    case "$n" in
+      44) printf '%s\n' '{own}' ;;
+      47) printf '%s\n' '{draft}' ;;
+      *) printf '%s\n' '{other}' | sed "s/\"d43\"/\"d$n\"/; s/\"PR_43\"/\"PR_$n\"/" ;;
+    esac ;;
+  repos/a/b/pulls/43|repos/a/b/pulls/44|repos/a/b/pulls/45|repos/a/b/pulls/46|repos/a/b/pulls/47)
     n=${{2##*/}}; merged=false; state=open
     [ -f "$here/merged-$n" ] && merged=true && state=closed
     printf '{{"number": %s, "title": "Ship %s", "state": "%s", "draft": false, "merged": %s, "head": {{"sha": "d%s"}}, "user": {{"login": "patchbay"}}, "body": "", "created_at": "2026-10-09T00:00:00Z", "html_url": "https://github.com/a/b/pull/%s"}}\n' "$n" "$n" "$state" "$merged" "$n" "$n" ;;
-  repos/a/b/pulls/4[3-6]/files\?*|repos/a/b/issues/4[3-6]/comments\?*|repos/a/b/pulls/4[3-6]/reviews\?*|repos/a/b/pulls/4[3-6]/comments\?*)
+  repos/a/b/pulls/4[3-7]/files\?*|repos/a/b/issues/4[3-7]/comments\?*|repos/a/b/pulls/4[3-7]/reviews\?*|repos/a/b/pulls/4[3-7]/comments\?*)
     printf '[]\n' ;;
-  repos/a/b/pulls/4[3-6]/reviews|repos/a/b/pulls/4[3-6]/merge)
+  repos/a/b/pulls/4[3-7]/reviews|repos/a/b/pulls/4[3-7]/merge)
     body=$(cat); printf '%s %s %s\n' "$4" "$2" "$body" >> "$here/calls.log"
     case "$2:$body" in
       */44/reviews:*APPROVE*)
@@ -92,8 +103,9 @@ esac
       *) printf '%s\n' '{{"id": 1}}' ;;
     esac ;;
 "#,
-        own = merge(44, true),
-        other = merge(43, false)
+        own = merge(44, true, false),
+        other = merge(43, false, false),
+        draft = merge(47, true, true)
     );
     let script = script.replace("case \"$2\" in\n", &format!("here=$(dirname \"$0\")\ncase \"$2\" in\n{open_prs}"));
     let gh = dir.join("gh");
@@ -380,4 +392,23 @@ fn real_pr_buttons() {
     assert!(head.contains("· merged ·"), "{head}");
     assert!(view.block("pr-actions").is_none());
     assert!(view.problems().is_empty(), "{:?}", view.problems());
+}
+
+#[test]
+fn a_draft_is_force_merged_marked_ready_first() {
+    let node = node();
+    let view = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/47"})).unwrap();
+    let buttons = view.block("pr-actions").unwrap()["buttons"].clone();
+    assert_eq!(buttons[0]["title"], "Force merge");
+    assert_eq!(buttons[0]["tone"], "bad");
+    assert_eq!(
+        buttons[0]["confirm"],
+        "Force-merge PR #47 into main, with a merge commit, as james, though it's a draft (it's marked ready first)?"
+    );
+    view.input(json!({"kind": "tap", "block": "pr-actions", "value": "merge:merge"})).unwrap();
+    let log = std::fs::read_to_string(fake_gh().parent().unwrap().join("calls.log")).unwrap();
+    let ready = log.lines().position(|l| l == "READY PR_47").expect("marked ready");
+    let merged = log.lines().position(|l| l.starts_with("PUT repos/a/b/pulls/47/merge")).expect("merged");
+    assert!(ready < merged, "{log}");
+    assert_eq!(view.block("head").unwrap()["subtitle"], "a/b · PR #47 · merged · 0 files, +0 −0");
 }
