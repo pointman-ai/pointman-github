@@ -1,7 +1,9 @@
 //! The `view` pane (Pointman's docs/dev/panes.md, MB-343): what a GitHub link shows, as blocks the apps
 //! draw for every extension alike, in place of the Mac's own GitHub viewer (MB-300). A PR is its
 //! conversation and its files in tabs, a commit its files, a file at a commit its code around the lines
-//! with how it changed in its PR, and an issue its conversation.
+//! with how it changed in its PR, and an issue its conversation. An open PR also says where it stands
+//! (checks, review, whether it can merge, and as whom), with buttons to approve and merge and a form to
+//! review it: `actions`, `tap` and `submit` in main.rs.
 
 use serde_json::{json, Value};
 
@@ -26,9 +28,12 @@ pub fn blocks(view: &Value) -> Value {
     let mut out = vec![json!({"type": "heading", "id": "head", "level": 1,
                               "text": view["title"].as_str().unwrap_or_default(), "subtitle": subtitle(view)})];
     match view["kind"].as_str() {
-        Some("pull") => out.push(json!({"type": "tabs", "id": "tabs", "selected": "conversation", "tabs": [
+        Some("pull") => {
+            out.extend(actions(view));
+            out.push(json!({"type": "tabs", "id": "tabs", "selected": "conversation", "tabs": [
             {"id": "conversation", "title": "Conversation", "children": [timeline(&view["thread"])]},
-            {"id": "files", "title": format!("Files {}", files.len()), "children": [diff(files, Value::Null)]}]})),
+            {"id": "files", "title": format!("Files {}", files.len()), "children": [diff(files, Value::Null)]}]}));
+        }
         Some("issue") => out.push(timeline(&view["thread"])),
         Some("commit") => out.push(diff(files, Value::Null)),
         _ => {
@@ -54,6 +59,84 @@ pub fn blocks(view: &Value) -> Value {
         }
     }
     fit(Value::Array(out), CONTENT_MAX)
+}
+
+/// An open PR's standing and what this login can do with it: a line saying its checks, review, whether it
+/// can merge and as whom; Approve and a button per merge method the repo allows (merging asks first); and
+/// a review with words. Nothing for a closed or merged PR.
+pub fn actions(view: &Value) -> Vec<Value> {
+    let m = &view["merge"];
+    if !m.is_object() {
+        return vec![];
+    }
+    if let Some(e) = m["error"].as_str() {
+        return vec![
+            json!({"type": "text", "id": "pr-status", "markdown": format!("_GitHub didn't say where this PR stands: {e}_")}),
+        ];
+    }
+    let number = &view["pull"]["number"];
+    let base = m["base"].as_str().unwrap_or("its base");
+    let c = &m["checks"];
+    let count = |k: &str| c[k].as_u64().unwrap_or(0);
+    let checks = match (count("passed"), count("failed"), count("pending")) {
+        (0, 0, 0) => "none".to_string(),
+        (p, f, w) => [(p, "passed"), (f, "failing"), (w, "running")]
+            .iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{n} {what}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let review = match m["review"].as_str() {
+        Some("APPROVED") => "approved",
+        Some("CHANGES_REQUESTED") => "changes requested",
+        Some("REVIEW_REQUIRED") => "needed",
+        _ => "none needed",
+    };
+    let state = m["state"].as_str().unwrap_or("UNKNOWN");
+    let can = match state {
+        "CLEAN" | "HAS_HOOKS" => format!("ready to merge into `{base}`"),
+        "UNSTABLE" => format!("can merge into `{base}`, though not every check passed"),
+        "BLOCKED" => format!("blocked from `{base}` by a required review or check"),
+        "BEHIND" => format!("behind `{base}`: update the branch first"),
+        "DIRTY" => format!("conflicts with `{base}`: resolve them on GitHub"),
+        "DRAFT" => "a draft: mark it ready on GitHub".to_string(),
+        _ => "GitHub is still working out whether it can merge".to_string(),
+    };
+    let viewer = m["viewer"].as_str().unwrap_or("this machine's login");
+    let mut out = vec![json!({"type": "text", "id": "pr-status", "markdown":
+        format!("**Checks** {checks} · **Review** {review} · {can}. Acting as **{viewer}**.")})];
+
+    let authored = m["authored"] == true;
+    let mut buttons = vec![];
+    if !authored && m["my_review"] != "APPROVED" {
+        buttons.push(json!({"id": "approve", "title": "Approve", "tone": "good"}));
+    }
+    if m["can_merge"] == true && m["draft"] != true && state != "DIRTY" {
+        let tone = if matches!(state, "CLEAN" | "HAS_HOOKS") { "good" } else { "warn" };
+        for method in m["methods"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            let (title, how) = match method {
+                "squash" => ("Squash and merge", "squashed into one commit"),
+                "rebase" => ("Rebase and merge", "rebased"),
+                _ => ("Merge", "with a merge commit"),
+            };
+            buttons.push(json!({"id": format!("merge:{method}"), "title": title, "tone": tone,
+                                "confirm": format!("Merge PR #{number} into {base}, {how}, as {viewer}?")}));
+        }
+    }
+    if !buttons.is_empty() {
+        out.push(json!({"type": "actions", "id": "pr-actions", "buttons": buttons}));
+    }
+    // GitHub takes no approval or change request from a PR's own author
+    let mut kinds = vec![json!({"value": "COMMENT", "title": "Comment"})];
+    if !authored {
+        kinds.push(json!({"value": "APPROVE", "title": "Approve"}));
+        kinds.push(json!({"value": "REQUEST_CHANGES", "title": "Request changes"}));
+    }
+    out.push(json!({"type": "form", "id": "pr-review", "submit": "Submit review", "fields": [
+        {"id": "event", "kind": "select", "label": "Review", "value": "COMMENT", "choices": kinds},
+        {"id": "body", "kind": "text", "label": "Comment", "value": ""}]}));
+    out
 }
 
 fn short(sha: &Value) -> String {
@@ -277,6 +360,48 @@ mod tests {
         assert!(files[1]["patch"].is_null() && files[0]["patch"].is_string() && files[2]["patch"].is_string());
         assert_eq!(cut[1]["markdown"], "_1 file is too big to show here: GitHub's page has them._");
         assert_eq!(fit(b.clone(), 1_000_000), b);
+    }
+
+    #[test]
+    fn an_open_prs_buttons_follow_where_it_stands() {
+        let mut v = pull();
+        let merge = |state: &str| {
+            json!({"viewer": "james", "methods": ["squash"], "can_merge": true, "mergeable": "MERGEABLE", "state": state,
+                   "review": "APPROVED", "draft": false, "authored": false, "my_review": "APPROVED", "base": "production",
+                   "checks": {"state": "FAILURE", "passed": 3, "failed": 1, "pending": 0}})
+        };
+        v["merge"] = merge("UNSTABLE");
+        let b = blocks(&v);
+        let ids: Vec<&str> = b.as_array().unwrap().iter().map(|x| x["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["head", "pr-status", "pr-actions", "pr-review", "tabs"]);
+        assert_eq!(
+            b[1]["markdown"],
+            "**Checks** 3 passed, 1 failing · **Review** approved · can merge into `production`, though not every \
+             check passed. Acting as **james**."
+        );
+        // already approved by this login: only the merge, which warns while a check fails
+        assert_eq!(
+            b[2]["buttons"],
+            json!([{"id": "merge:squash", "title": "Squash and merge", "tone": "warn",
+                    "confirm": "Merge PR #42 into production, squashed into one commit, as james?"}])
+        );
+        // conflicts, a draft, or no right to merge: no merge buttons
+        for (field, value) in [("state", json!("DIRTY")), ("draft", json!(true)), ("can_merge", json!(false))] {
+            v["merge"] = merge("CLEAN");
+            v["merge"][field] = value;
+            assert!(actions(&v).iter().all(|x| x["id"] != "pr-actions"), "{field}");
+        }
+        v["merge"] = merge("DIRTY");
+        assert!(actions(&v)[0]["markdown"]
+            .as_str()
+            .unwrap()
+            .contains("conflicts with `production`: resolve them on GitHub"));
+        v["merge"] = json!({"error": "Resource not accessible by integration"});
+        assert_eq!(
+            actions(&v),
+            [json!({"type": "text", "id": "pr-status",
+                    "markdown": "_GitHub didn't say where this PR stands: Resource not accessible by integration_"})]
+        );
     }
 
     /// What the SDK's show sends when the thread grows: the new comment and the subtitle, in place.

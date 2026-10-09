@@ -1,7 +1,8 @@
 //! The extension's process: the node starts it (`bin/github`, from the extension's folder) and talks to it
 //! over stdin and stdout. It installs GitHub's CLI where there's none, signs GitHub accounts in from the
 //! apps into the vault, gives agents' runs the vault's token, and `github.view {url}` answers with what a
-//! GitHub link shows. The `view` pane shows the same as blocks, and keeps it current.
+//! GitHub link shows. The `view` pane shows the same as blocks, and keeps it current; on an open PR its
+//! buttons and review form approve, merge and review it on GitHub, as this machine's login.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use github::signin::SignIns;
-use github::{find_gh, install, pane, parse, GitHub, Kept, Link};
+use github::{find_gh, install, pane, parse, said, GitHub, Kept, Link};
 use pointman_extension::{Extension, Handle, Job, Pane, Refused};
 use regex::Regex;
 use serde_json::{json, Value};
@@ -84,6 +85,67 @@ fn view(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, link: &Link, fresh: bool)
     Ok(got)
 }
 
+type Titles = Arc<Mutex<HashMap<String, String>>>;
+
+/// A view on its pane: the blocks (show sends what changed) and the title, when it changed.
+fn shown(p: &Pane, got: &Value, titles: &Titles) {
+    p.show(pane::blocks(got));
+    let title = pane::title(got);
+    let mut titles = titles.lock().unwrap_or_else(|e| e.into_inner());
+    if titles.get(p.id()) != Some(&title) && p.is_open() {
+        p.set_title(&title);
+        titles.insert(p.id().to_string(), title);
+    }
+}
+
+/// A button or the review form on an open PR's pane: GitHub approves, merges or takes the review as this
+/// machine's login (the vault's account, else its own gh login), on the head the pane showed, and the pane
+/// shows GitHub's answer at once. What GitHub refuses comes back with its reason.
+fn act(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, titles: &Titles, p: &Pane, event: &Value) -> anyhow::Result<()> {
+    let refuse = |why: String| -> anyhow::Result<()> { Err(Refused::new(why).into()) };
+    let (kind, block) = (event["kind"].as_str().unwrap_or_default(), event["block"].as_str().unwrap_or_default());
+    if !matches!((kind, block), ("tap", "pr-actions") | ("submit", "pr-review")) {
+        return refuse(format!("the GitHub view has nothing to do for {kind} on {block}"));
+    }
+    let link = match parse(p.target()["url"].as_str().unwrap_or_default()) {
+        Ok(link) if link.kind == "pull" => link,
+        _ => return refuse("only a PR is reviewed or merged here".into()),
+    };
+    let shown_now = match view(h, vault, kept, &link, false) {
+        Ok(v) => v,
+        Err(e) => return refuse(format!("{e:#}")),
+    };
+    if !shown_now["merge"].is_object() {
+        return refuse(format!("PR #{} isn't open", link.reference));
+    }
+    let sha = shown_now["ref"].as_str().unwrap_or_default().to_string();
+    let number: u64 = link.reference.parse()?;
+    let Some(gh) = cli(h) else { return refuse("GitHub's CLI isn't on this machine yet".into()) };
+    let github = GitHub::new(gh).token(vault.lock().unwrap_or_else(|e| e.into_inner()).token(h));
+    let value = &event["value"];
+    let done = match (kind, value.as_str()) {
+        ("tap", Some("approve")) => github.review(&link.repo, number, "APPROVE", "", &sha),
+        ("tap", Some(b)) if b.starts_with("merge:") => github.merge(&link.repo, number, &b["merge:".len()..], &sha),
+        ("submit", _) => {
+            let kind = value["event"].as_str().unwrap_or("COMMENT");
+            let body = value["body"].as_str().unwrap_or_default();
+            if kind != "APPROVE" && body.trim().is_empty() {
+                return refuse("a comment or a change request needs words".into());
+            }
+            github.review(&link.repo, number, kind, body, &sha)
+        }
+        _ => return refuse(format!("{value} isn't one of this PR's buttons")),
+    };
+    if let Err(e) = done {
+        return refuse(said(&e));
+    }
+    match view(h, vault, kept, &link, true) {
+        Ok(got) => shown(p, &got, titles),
+        Err(e) => h.log(format!("pane {}: couldn't ask GitHub again: {e:#}", p.id())),
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let mut ext = Extension::new()?;
     let h = ext.handle();
@@ -148,16 +210,18 @@ fn main() -> anyhow::Result<()> {
 
     // the `view` pane: the same, as blocks (Pointman's docs/dev/panes.md), asked again each minute; show
     // sends only what changed, so a new comment slides in and the open tab stays put
-    let titles: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+    let titles: Titles = Arc::default();
     let (hh, v, k, t) = (h.clone(), vault.clone(), kept.clone(), titles.clone());
     ext.pane("view", move |p: &Pane| {
         let url = p.target()["url"].as_str().context("the GitHub view opens a GitHub link: its target has no url")?;
         let got = view(&hh, &v, &k, &parse(url)?, false)?;
         let title = pane::title(&got);
         t.lock().unwrap_or_else(|e| e.into_inner()).insert(p.id().to_string(), title.clone());
-        p.on_input(|_: &Pane, event: &Value| -> anyhow::Result<()> {
+        let (ih, iv, ik, it) = (hh.clone(), v.clone(), k.clone(), t.clone());
+        p.on_input(move |p: &Pane, event: &Value| -> anyhow::Result<()> {
             match event["kind"].as_str().unwrap_or_default() {
                 "select" => Ok(()), // a tab: the app shows it
+                "tap" | "submit" => act(&ih, &iv, &ik, &it, p, event),
                 kind => Err(Refused::new(format!("the GitHub view has nothing to do for {kind}")).into()),
             }
         });
@@ -174,15 +238,7 @@ fn main() -> anyhow::Result<()> {
             for p in h.panes("view") {
                 let Ok(link) = parse(p.target()["url"].as_str().unwrap_or_default()) else { continue };
                 match view(h, &v, &k, &link, true) {
-                    Ok(got) => {
-                        p.show(pane::blocks(&got));
-                        let title = pane::title(&got);
-                        let mut titles = titles.lock().unwrap_or_else(|e| e.into_inner());
-                        if titles.get(p.id()) != Some(&title) && p.is_open() {
-                            p.set_title(&title);
-                            titles.insert(p.id().to_string(), title);
-                        }
-                    }
+                    Ok(got) => shown(&p, &got, &titles),
                     Err(e) => h.log(format!("pane {}: couldn't ask GitHub again: {e:#}", p.id())),
                 }
             }

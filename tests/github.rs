@@ -58,6 +58,44 @@ case "$2" in
 esac
 "#
     );
+    // PRs 43–46, open, for the pane's buttons and review form: 44 is the login's own, 45 merges (and is
+    // merged after), 46 can't merge; what's sent is logged in calls.log beside gh
+    let merge = |n: u64, authored: bool| {
+        json!({"data": {"viewer": {"login": "james"}, "repository": {"mergeCommitAllowed": true,
+               "squashMergeAllowed": false, "rebaseMergeAllowed": true, "viewerPermission": "ADMIN",
+               "pullRequest": {"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": "REVIEW_REQUIRED",
+                               "isDraft": false, "viewerDidAuthor": authored, "baseRefName": "main", "viewerLatestReview": null,
+                               "commits": {"nodes": [{"commit": {"oid": format!("d{n}"), "statusCheckRollup": {"state": "SUCCESS",
+                                   "contexts": {"nodes": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                                                          {"__typename": "StatusContext", "state": "PENDING"}]}}}}]}}}}})
+    };
+    let open_prs = format!(
+        r#"  graphql)
+    n=$(printf '%s\n' "$@" | sed -n 's/^number=//p')
+    [ "$n" = 44 ] && printf '%s\n' '{own}' || printf '%s\n' '{other}' | sed "s/\"d43\"/\"d$n\"/" ;;
+  repos/a/b/pulls/43|repos/a/b/pulls/44|repos/a/b/pulls/45|repos/a/b/pulls/46)
+    n=${{2##*/}}; merged=false; state=open
+    [ -f "$here/merged-$n" ] && merged=true && state=closed
+    printf '{{"number": %s, "title": "Ship %s", "state": "%s", "draft": false, "merged": %s, "head": {{"sha": "d%s"}}, "user": {{"login": "patchbay"}}, "body": "", "created_at": "2026-10-09T00:00:00Z", "html_url": "https://github.com/a/b/pull/%s"}}\n' "$n" "$n" "$state" "$merged" "$n" "$n" ;;
+  repos/a/b/pulls/4[3-6]/files\?*|repos/a/b/issues/4[3-6]/comments\?*|repos/a/b/pulls/4[3-6]/reviews\?*|repos/a/b/pulls/4[3-6]/comments\?*)
+    printf '[]\n' ;;
+  repos/a/b/pulls/4[3-6]/reviews|repos/a/b/pulls/4[3-6]/merge)
+    body=$(cat); printf '%s %s %s\n' "$4" "$2" "$body" >> "$here/calls.log"
+    case "$2:$body" in
+      */44/reviews:*APPROVE*)
+        printf '%s\n' '{{"message":"Unprocessable Entity","errors":["Review Can not approve your own pull request"]}}'
+        echo "gh: Unprocessable Entity (HTTP 422)" >&2; exit 1 ;;
+      */46/merge:*)
+        printf '%s\n' '{{"message":"Pull Request is not mergeable"}}'
+        echo "gh: Pull Request is not mergeable (HTTP 405)" >&2; exit 1 ;;
+      */merge:*) n=${{2#repos/a/b/pulls/}}; touch "$here/merged-${{n%/merge}}"; printf '%s\n' '{{"merged": true}}' ;;
+      *) printf '%s\n' '{{"id": 1}}' ;;
+    esac ;;
+"#,
+        own = merge(44, true),
+        other = merge(43, false)
+    );
+    let script = script.replace("case \"$2\" in\n", &format!("here=$(dirname \"$0\")\ncase \"$2\" in\n{open_prs}"));
     let gh = dir.join("gh");
     std::fs::write(&gh, script).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -209,7 +247,9 @@ fn a_pr_opens_as_a_pane_of_its_conversation_and_files() {
     // a tab is the app's to show; anything else has nothing to do here
     view.input(json!({"kind": "select", "block": "tabs", "value": "files"})).unwrap();
     let refused = view.input(json!({"kind": "tap", "block": "diff"})).unwrap_err();
-    assert_eq!(refused.message, "the GitHub view has nothing to do for tap");
+    assert_eq!(refused.message, "the GitHub view has nothing to do for tap on diff");
+    // a merged PR says nothing more and has no buttons
+    assert!(view.block("pr-status").is_none() && view.block("pr-actions").is_none());
     assert!(view.problems().is_empty(), "{:?}", view.problems());
 }
 
@@ -235,4 +275,109 @@ fn a_pane_that_cant_open_says_why() {
     assert_eq!(missing.message, "GitHub doesn't show that PR to this machine's gh login");
     let no_url = node.open_pane("view", json!({"item": "MB-286"})).err().unwrap();
     assert_eq!(no_url.message, "the GitHub view opens a GitHub link: its target has no url");
+}
+
+/// What the stand-in gh was sent for a PR: `<method> <path> <body>`, oldest first.
+fn sent(pr: u64) -> Vec<String> {
+    let log = fake_gh().parent().unwrap().join("calls.log");
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    text.lines().filter(|l| l.contains(&format!("/pulls/{pr}/"))).map(String::from).collect()
+}
+
+#[test]
+fn an_open_pr_is_approved_and_reviewed_from_its_pane() {
+    let node = node();
+    let view = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/43"})).unwrap();
+    assert_eq!(
+        view.block("pr-status").unwrap()["markdown"],
+        "**Checks** 1 passed, 1 running · **Review** needed · ready to merge into `main`. Acting as **james**."
+    );
+    let buttons = view.block("pr-actions").unwrap()["buttons"].clone();
+    let ids: Vec<&str> = buttons.as_array().unwrap().iter().map(|b| b["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["approve", "merge:merge", "merge:rebase"]); // the repo doesn't allow squash
+    assert_eq!(buttons[1]["confirm"], "Merge PR #43 into main, with a merge commit, as james?");
+    view.input(json!({"kind": "tap", "block": "pr-actions", "value": "approve"})).unwrap();
+    view.input(json!({"kind": "submit", "block": "pr-review",
+                      "value": {"event": "REQUEST_CHANGES", "body": "  Rename it  "}}))
+        .unwrap();
+    assert_eq!(
+        sent(43),
+        [
+            r#"POST repos/a/b/pulls/43/reviews {"commit_id":"d43","event":"APPROVE"}"#,
+            r#"POST repos/a/b/pulls/43/reviews {"body":"Rename it","commit_id":"d43","event":"REQUEST_CHANGES"}"#
+        ]
+    );
+    let empty = view.input(json!({"kind": "submit", "block": "pr-review", "value": {"event": "COMMENT", "body": " "}}));
+    assert_eq!(empty.unwrap_err().message, "a comment or a change request needs words");
+    let odd = view.input(json!({"kind": "tap", "block": "pr-actions", "value": "close"})).unwrap_err();
+    assert_eq!(odd.message, "\"close\" isn't one of this PR's buttons");
+    assert!(view.problems().is_empty(), "{:?}", view.problems());
+}
+
+#[test]
+fn what_github_refuses_comes_back_with_its_reason() {
+    let node = node();
+    // their own PR: no Approve, and the review form only comments
+    let own = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/44"})).unwrap();
+    let ids: Vec<String> = own.block("pr-actions").unwrap()["buttons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["merge:merge", "merge:rebase"]);
+    assert_eq!(
+        own.block("pr-review").unwrap()["fields"][0]["choices"],
+        json!([{"value": "COMMENT", "title": "Comment"}])
+    );
+    // an older app's tap anyway: GitHub's reason
+    let refused = own.input(json!({"kind": "tap", "block": "pr-actions", "value": "approve"})).unwrap_err();
+    assert_eq!(refused.message, "Review Can not approve your own pull request"); // GitHub's own words
+    let stuck = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/46"})).unwrap();
+    let refused = stuck.input(json!({"kind": "tap", "block": "pr-actions", "value": "merge:merge"})).unwrap_err();
+    assert_eq!(refused.message, "Pull Request is not mergeable");
+}
+
+#[test]
+fn a_merge_goes_to_github_and_the_pane_shows_it_merged() {
+    let node = node();
+    let view = node.open_pane("view", json!({"url": "https://github.com/a/b/pull/45"})).unwrap();
+    view.input(json!({"kind": "tap", "block": "pr-actions", "value": "merge:rebase"})).unwrap();
+    assert_eq!(sent(45), [r#"PUT repos/a/b/pulls/45/merge {"merge_method":"rebase","sha":"d45"}"#]);
+    // GitHub's answer at once: merged, and nothing left to press
+    assert_eq!(view.block("head").unwrap()["subtitle"], "a/b · PR #45 · merged · 0 files, +0 −0");
+    assert!(view.block("pr-actions").is_none() && view.block("pr-review").is_none());
+    let again = view.input(json!({"kind": "tap", "block": "pr-actions", "value": "merge:rebase"})).unwrap_err();
+    assert_eq!(again.message, "PR #45 isn't open");
+    assert!(view.problems().is_empty(), "{:?}", view.problems());
+}
+
+/// The pane's buttons against the real GitHub, with this machine's own `gh`: it reviews and MERGES the PR
+/// you name, so name a throwaway one, opened by this login, into a throwaway base. By hand:
+/// `GITHUB_PANE_TEST_PR=https://github.com/<owner>/<repo>/pull/<n> cargo test --test github real_pr_buttons -- --ignored`.
+#[test]
+#[ignore]
+fn real_pr_buttons() {
+    let url = std::env::var("GITHUB_PANE_TEST_PR").expect("GITHUB_PANE_TEST_PR: a throwaway PR");
+    let node = StandIn::new(env!("CARGO_MANIFEST_DIR")).binary(env!("CARGO_BIN_EXE_github")).start().unwrap();
+    let view = node.open_pane("view", json!({"url": url})).unwrap();
+    let status = view.block("pr-status").unwrap()["markdown"].as_str().unwrap().to_string();
+    println!("status: {status}");
+    assert!(status.contains("Acting as **"), "{status}");
+    let buttons = view.block("pr-actions").unwrap()["buttons"].clone();
+    println!("buttons: {buttons}");
+    // this login opened it: GitHub takes no approval from its author, and says so
+    let own = view.input(json!({"kind": "tap", "block": "pr-actions", "value": "approve"})).unwrap_err();
+    println!("approve: {}", own.message);
+    assert_eq!(own.message, "Review Can not approve your own pull request");
+    view.input(json!({"kind": "submit", "block": "pr-review", "value": {"event": "COMMENT", "body": "Reviewed from Pointman's GitHub pane (live test)."}}))
+        .unwrap();
+    let said = view.block("timeline").unwrap()["events"].clone();
+    assert!(said.to_string().contains("Reviewed from Pointman's GitHub pane"), "{said}");
+    view.input(json!({"kind": "tap", "block": "pr-actions", "value": "merge:merge"})).unwrap();
+    let head = view.block("head").unwrap()["subtitle"].as_str().unwrap().to_string();
+    println!("after merge: {head}");
+    assert!(head.contains("· merged ·"), "{head}");
+    assert!(view.block("pr-actions").is_none());
+    assert!(view.problems().is_empty(), "{:?}", view.problems());
 }

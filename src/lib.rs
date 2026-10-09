@@ -14,8 +14,12 @@
 //!  thread: {author, body, created_at, url,                      // a PR's or an issue's, else null
 //!           comments: [{author, body, created_at, url}],
 //!           reviews: [{author, state, body, submitted_at, url}],  // a PR's
-//!           review_comments: [{author, body, created_at, path, line, url, in_reply_to, review_id}]} | null}
+//!           review_comments: [{author, body, created_at, path, line, url, in_reply_to, review_id}]} | null,
+//!  merge: {viewer, methods, can_merge, mergeable, state, review, draft, authored, my_review, base,
+//!          checks: {state, passed, failed, pending}} | {error} | null}   // an open PR's, as this login
 //! ```
+//!
+//! An open PR can be reviewed and merged from the viewer (`review`, `merge`), as the login that asks.
 
 pub mod install;
 pub mod pane;
@@ -226,8 +230,20 @@ impl GitHub {
 
     /// `gh api <path>`: the body as bytes, cut at `max`, and whether there was more.
     fn call(&self, path: &str, raw: bool, max: usize) -> anyhow::Result<(Vec<u8>, bool)> {
+        self.call_with(path, &[], None, raw, max)
+    }
+
+    /// `gh api <path> <args…>`, with `input` on its stdin (`--input -`, a request's JSON body).
+    fn call_with(
+        &self,
+        path: &str,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+        raw: bool,
+        max: usize,
+    ) -> anyhow::Result<(Vec<u8>, bool)> {
         let mut cmd = Command::new(&self.gh);
-        cmd.arg("api").arg(path);
+        cmd.arg("api").arg(path).args(args);
         if raw {
             cmd.args(["-H", "Accept: application/vnd.github.raw"]);
         }
@@ -235,13 +251,18 @@ impl GitHub {
             cmd.env("GH_TOKEN", t);
         }
         let mut child = cmd
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GH_PROMPT_DISABLED", "1")
             .env("NO_COLOR", "1")
             .spawn()
             .with_context(|| format!("couldn't run {}", self.gh.display()))?;
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            std::thread::spawn(move || {
+                let _ = std::io::Write::write_all(&mut stdin, &input);
+            });
+        }
         let mut out = child.stdout.take().context("gh's output")?;
         let mut err = child.stderr.take().context("gh's errors")?;
         let reader = std::thread::spawn(move || {
@@ -282,6 +303,14 @@ impl GitHub {
         let errs = errs.join().unwrap_or_default();
         if !status.success() {
             let said = errs.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            // GitHub's reason is in the answer's errors ("Can not approve your own pull request"), gh says
+            // only its kind ("Unprocessable Entity")
+            let said = match (errors_in(&body), Regex::new(r"^gh: .* \(HTTP (\d{3})\)$").ok()) {
+                (Some(why), Some(re)) if re.is_match(&said) => {
+                    re.replace(&said, format!("gh: {why} (HTTP $1)")).into_owned()
+                }
+                _ => said,
+            };
             if said.contains("HTTP 404") || said.contains("HTTP 403") || said.contains("HTTP 422") {
                 return Err(NotThere(said).into());
             }
@@ -346,6 +375,59 @@ impl GitHub {
         }))
     }
 
+    /// A request with a JSON body (`-X POST`, `PUT`…), for what changes GitHub: its answer, or GitHub's own
+    /// words for why not.
+    fn send(&self, method: &str, path: &str, body: &Value) -> anyhow::Result<Value> {
+        let input = serde_json::to_vec(body)?;
+        let (out, _) = self
+            .call_with(path, &["-X", method, "--input", "-"], Some(input), false, 1024 * 1024)
+            .map_err(|e| anyhow::anyhow!(said(&e)))?;
+        Ok(serde_json::from_slice(&out).unwrap_or(Value::Null))
+    }
+
+    /// An open PR as this login may act on it: who that is, how the repo lets it be merged and whether
+    /// this login may, whether it can be (GitHub's mergeable state), its review decision and its checks.
+    pub fn merge_status(&self, repo: &str, number: u64) -> anyhow::Result<Value> {
+        let (owner, name) = repo.split_once('/').context("a repo is owner/name")?;
+        let query = format!("query={MERGE_QUERY}");
+        let (owner, name, number) = (format!("owner={owner}"), format!("name={name}"), format!("number={number}"));
+        let (out, _) =
+            self.call_with("graphql", &["-f", &query, "-F", &owner, "-F", &name, "-F", &number], None, false, 1 << 20)?;
+        let got: Value = serde_json::from_slice(&out).context("GitHub's answer for a PR's merge status")?;
+        Ok(merge_of(&got["data"]))
+    }
+
+    /// A review of a PR as this login, on the head it was shown at: APPROVE, REQUEST_CHANGES or COMMENT,
+    /// with its words (GitHub wants words for the last two).
+    pub fn review(&self, repo: &str, number: u64, event: &str, body: &str, sha: &str) -> anyhow::Result<()> {
+        if !matches!(event, "APPROVE" | "REQUEST_CHANGES" | "COMMENT") {
+            bail!("{event} isn't a review: APPROVE, REQUEST_CHANGES or COMMENT");
+        }
+        let mut review = json!({"event": event, "commit_id": sha});
+        if !body.trim().is_empty() {
+            review["body"] = json!(body.trim());
+        }
+        self.send("POST", &format!("repos/{repo}/pulls/{number}/reviews"), &review)?;
+        Ok(())
+    }
+
+    /// Merges a PR as this login, only while its head is still `sha` (what was shown), by `method`: merge,
+    /// squash or rebase.
+    pub fn merge(&self, repo: &str, number: u64, method: &str, sha: &str) -> anyhow::Result<()> {
+        if !matches!(method, "merge" | "squash" | "rebase") {
+            bail!("{method} isn't a way to merge: merge, squash or rebase");
+        }
+        let done = self.send(
+            "PUT",
+            &format!("repos/{repo}/pulls/{number}/merge"),
+            &json!({"merge_method": method, "sha": sha}),
+        )?;
+        if done["merged"] == false {
+            bail!("{}", done["message"].as_str().unwrap_or("GitHub didn't merge it"));
+        }
+        Ok(())
+    }
+
     /// What the viewer shows for a link.
     pub fn view(&self, link: &Link) -> anyhow::Result<Value> {
         let repo = &link.repo;
@@ -359,6 +441,13 @@ impl GitHub {
                 out["pull"] = pull(&d, d["merged"].as_bool() == Some(true));
                 out["files"] = Value::Array(self.pull_files(repo, link.reference.parse()?)?);
                 out["thread"] = self.thread(repo, &d, true)?;
+                // an open PR: what this login may do with it (an answer that fails says why, in place)
+                if d["state"] == "open" && d["merged"] != true {
+                    out["merge"] = match self.merge_status(repo, link.reference.parse()?) {
+                        Ok(m) => m,
+                        Err(e) => json!({"error": said(&e)}),
+                    };
+                }
             }
             "issue" => {
                 let d = self.json(&format!("repos/{repo}/issues/{}", link.reference)).map_err(not_there("issue"))?;
@@ -408,6 +497,88 @@ impl GitHub {
             }
         }
         Ok(out)
+    }
+}
+
+/// An open PR's merge status in one GraphQL query: the login, the repo's merge methods and this login's
+/// permission, and the PR's mergeability, review decision and its head's checks.
+const MERGE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { viewer { login } \
+    repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission \
+    pullRequest(number: $number) { mergeable mergeStateStatus reviewDecision isDraft viewerDidAuthor baseRefName \
+    viewerLatestReview { state } commits(last: 1) { nodes { commit { oid statusCheckRollup { state \
+    contexts(first: 100) { nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }";
+
+/// MERGE_QUERY's answer as the viewer keeps it.
+pub fn merge_of(data: &Value) -> Value {
+    let repo = &data["repository"];
+    let pr = &repo["pullRequest"];
+    let methods: Vec<&str> =
+        [("mergeCommitAllowed", "merge"), ("squashMergeAllowed", "squash"), ("rebaseMergeAllowed", "rebase")]
+            .iter()
+            .filter(|(allowed, _)| repo[*allowed] == true)
+            .map(|(_, method)| *method)
+            .collect();
+    let rollup = &pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"];
+    let (mut passed, mut failed, mut pending) = (0, 0, 0);
+    for c in rollup["contexts"]["nodes"].as_array().into_iter().flatten() {
+        let outcome = match c["__typename"].as_str() {
+            Some("CheckRun") if c["status"] != "COMPLETED" => "pending",
+            Some("CheckRun") => match c["conclusion"].as_str() {
+                Some("SUCCESS" | "NEUTRAL" | "SKIPPED") => "passed",
+                _ => "failed",
+            },
+            _ => match c["state"].as_str() {
+                Some("SUCCESS") => "passed",
+                Some("PENDING" | "EXPECTED") => "pending",
+                _ => "failed",
+            },
+        };
+        match outcome {
+            "passed" => passed += 1,
+            "pending" => pending += 1,
+            _ => failed += 1,
+        }
+    }
+    json!({
+        "viewer": data["viewer"]["login"], "methods": methods,
+        "can_merge": matches!(repo["viewerPermission"].as_str(), Some("ADMIN" | "MAINTAIN" | "WRITE")),
+        "mergeable": pr["mergeable"], "state": pr["mergeStateStatus"], "review": pr["reviewDecision"],
+        "draft": pr["isDraft"], "authored": pr["viewerDidAuthor"], "my_review": pr["viewerLatestReview"]["state"],
+        "base": pr["baseRefName"], "head": pr["commits"]["nodes"][0]["commit"]["oid"],
+        "checks": {"state": rollup["state"], "passed": passed, "failed": failed, "pending": pending},
+    })
+}
+
+/// The reasons in an error answer's `errors` (strings, or `{message}` / `{field, code}`), joined.
+fn errors_in(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let why: Vec<String> = v["errors"]
+        .as_array()?
+        .iter()
+        .filter_map(|e| match e {
+            Value::String(s) => Some(s.clone()),
+            _ => e["message"].as_str().map(String::from).or_else(|| {
+                Some(format!(
+                    "{} {}",
+                    e["field"].as_str()?,
+                    e["code"].as_str().unwrap_or("isn't right").replace('_', " ")
+                ))
+            }),
+        })
+        .collect();
+    (!why.is_empty()).then(|| why.join("; "))
+}
+
+/// What GitHub said, from gh's error: `gh: Can not approve your own pull request (HTTP 422)` is "Can not
+/// approve your own pull request".
+pub fn said(e: &anyhow::Error) -> String {
+    let text = e.to_string();
+    let line = text.rsplit("gh: ").next().unwrap_or(&text).trim();
+    let line = Regex::new(r"\s*\(HTTP \d{3}\)$").map_or(line.to_string(), |re| re.replace(line, "").into_owned());
+    if line.is_empty() {
+        text
+    } else {
+        line
     }
 }
 
@@ -462,6 +633,45 @@ impl Kept {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_merge_status_and_githubs_reasons() {
+        let data = json!({"viewer": {"login": "james"}, "repository": {
+            "mergeCommitAllowed": true, "squashMergeAllowed": false, "rebaseMergeAllowed": true, "viewerPermission": "WRITE",
+            "pullRequest": {"mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
+                            "isDraft": false, "viewerDidAuthor": true, "baseRefName": "main", "viewerLatestReview": {"state": "COMMENTED"},
+                            "commits": {"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {"state": "PENDING", "contexts": {"nodes": [
+                                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "TIMED_OUT"},
+                                {"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null},
+                                {"__typename": "StatusContext", "state": "ERROR"}]}}}}]}}}});
+        assert_eq!(
+            merge_of(&data),
+            json!({"viewer": "james", "methods": ["merge", "rebase"], "can_merge": true, "mergeable": "MERGEABLE",
+                   "state": "BLOCKED", "review": "REVIEW_REQUIRED", "draft": false, "authored": true, "my_review": "COMMENTED",
+                   "base": "main", "head": "abc", "checks": {"state": "PENDING", "passed": 1, "failed": 2, "pending": 1}})
+        );
+        let read_only = json!({"repository": {"viewerPermission": "READ", "pullRequest": {}}});
+        assert_eq!(merge_of(&read_only)["can_merge"], false);
+        assert_eq!(
+            said(&anyhow::anyhow!("gh api x: gh: Pull Request is not mergeable (HTTP 405)")),
+            "Pull Request is not mergeable"
+        );
+        assert_eq!(said(&anyhow::anyhow!("couldn't run gh")), "couldn't run gh");
+        assert_eq!(
+            errors_in(br#"{"message":"Unprocessable Entity","errors":["Can not approve your own pull request"]}"#)
+                .as_deref(),
+            Some("Can not approve your own pull request")
+        );
+        assert_eq!(
+            errors_in(
+                br#"{"errors":[{"resource":"Label","code":"missing_field","field":"name"},{"message":"too long"}]}"#
+            )
+            .as_deref(),
+            Some("name missing field; too long")
+        );
+        assert_eq!(errors_in(br#"{"message":"Not Found"}"#), None);
+    }
 
     #[test]
     fn links() {
