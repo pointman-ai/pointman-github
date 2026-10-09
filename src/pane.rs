@@ -3,7 +3,9 @@
 //! conversation and its files in tabs, a commit its files, a file at a commit its code around the lines
 //! with how it changed in its PR, and an issue its conversation. An open PR also says where it stands
 //! (checks, review, whether it can merge, and as whom), with buttons to approve and merge and a form to
-//! review it: `actions`, `tap` and `submit` in main.rs.
+//! review it (`actions`). A PR's or an issue's page also has its labels, assignees and review requests,
+//! buttons to close or reopen it (and a PR's draft and branch), a form for its title, labels, assignees and
+//! review requests (`manage`), and a comment box under its conversation. `act` in main.rs does each.
 
 use serde_json::{json, Value};
 
@@ -30,11 +32,18 @@ pub fn blocks(view: &Value) -> Value {
     match view["kind"].as_str() {
         Some("pull") => {
             out.extend(actions(view));
+            out.extend(manage(view));
+            let mut conversation = vec![timeline(&view["thread"])];
+            conversation.extend(comment_box(view));
             out.push(json!({"type": "tabs", "id": "tabs", "selected": "conversation", "tabs": [
-            {"id": "conversation", "title": "Conversation", "children": [timeline(&view["thread"])]},
+            {"id": "conversation", "title": "Conversation", "children": conversation},
             {"id": "files", "title": format!("Files {}", files.len()), "children": [diff(files, Value::Null)]}]}));
         }
-        Some("issue") => out.push(timeline(&view["thread"])),
+        Some("issue") => {
+            out.extend(manage(view));
+            out.push(timeline(&view["thread"]));
+            out.extend(comment_box(view));
+        }
         Some("commit") => out.push(diff(files, Value::Null)),
         _ => {
             let file = &view["file"];
@@ -160,6 +169,123 @@ pub fn actions(view: &Value) -> Vec<Value> {
         {"id": "event", "kind": "select", "label": "Review", "value": "COMMENT", "choices": kinds},
         {"id": "body", "kind": "text", "label": "Comment", "value": ""}]}));
     out
+}
+
+/// A PR's or an issue's page beside its conversation: a line with its labels, assignees and review
+/// requests (an issue's state too); for a login that may write, its state buttons (close or reopen; a PR's
+/// draft, branch update and, once it's done, its branch's delete) and a form for its title, labels,
+/// assignees and review requests.
+pub fn manage(view: &Value) -> Vec<Value> {
+    let m = &view["meta"];
+    if !m.is_object() {
+        return vec![];
+    }
+    if let Some(e) = m["error"].as_str() {
+        return vec![
+            json!({"type": "text", "id": "meta-line", "markdown": format!("_GitHub didn't give this page's labels and people: {e}_")}),
+        ];
+    }
+    let pull = view["kind"] == "pull";
+    let number = if pull { &view["pull"]["number"] } else { &view["issue"]["number"] };
+    let names = |v: &Value, key: Option<&str>| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| key.map_or(x.as_str(), |k| x[k].as_str()))
+            .map(String::from)
+            .collect()
+    };
+    let (labels, assignees, reviewers) =
+        (names(&m["labels"], Some("name")), names(&m["assignees"], None), names(&m["reviewers"], None));
+    let mut line = vec![];
+    if !pull {
+        line.push(match (m["state"].as_str(), m["state_reason"].as_str()) {
+            (Some("open"), _) => "**Open**".to_string(),
+            (_, Some("not_planned")) => "**Closed** as not planned".to_string(),
+            _ => "**Closed** as completed".to_string(),
+        });
+    }
+    for (title, list) in [("Labels", &labels), ("Assignees", &assignees), ("Review requested from", &reviewers)] {
+        if !list.is_empty() {
+            line.push(format!("**{title}** {}", list.join(", ")));
+        }
+    }
+    let mut out = vec![];
+    if !line.is_empty() {
+        out.push(json!({"type": "text", "id": "meta-line", "markdown": line.join(" · ")}));
+    }
+    if m["can_write"] != true {
+        return out;
+    }
+
+    let open = m["state"] == "open";
+    let mut buttons = vec![];
+    if pull {
+        let head = &m["head"];
+        let branch = head["branch"].as_str().unwrap_or_default();
+        if open {
+            buttons.push(json!({"id": "close", "title": "Close", "tone": "bad",
+                                "confirm": format!("Close PR #{number} without merging it?")}));
+            if m["draft"] == true {
+                buttons.push(json!({"id": "ready", "title": "Ready for review", "tone": "info"}));
+            } else {
+                buttons.push(json!({"id": "draft", "title": "Convert to draft", "tone": "neutral"}));
+            }
+            if view["merge"]["state"] == "BEHIND" {
+                buttons.push(json!({"id": "update-branch", "title": "Update branch", "tone": "info"}));
+            }
+        } else if m["merged"] != true {
+            buttons.push(json!({"id": "reopen", "title": "Reopen", "tone": "info"}));
+        }
+        if !open && head["same_repo"] == true && head["exists"] == true {
+            buttons.push(json!({"id": "delete-branch", "title": "Delete branch", "tone": "bad",
+                                "confirm": format!("Delete the branch {branch}?")}));
+        }
+    } else if open {
+        buttons.push(json!({"id": "close:completed", "title": "Close as completed", "tone": "good"}));
+        buttons.push(json!({"id": "close:not_planned", "title": "Close as not planned", "tone": "neutral"}));
+    } else {
+        buttons.push(json!({"id": "reopen", "title": "Reopen", "tone": "info"}));
+    }
+    if !buttons.is_empty() {
+        out.push(json!({"type": "actions", "id": "state", "buttons": buttons}));
+    }
+
+    // a choice of none first, so a field left alone changes nothing
+    let pick = |id: &str, label: &str, from: Vec<String>| -> Option<Value> {
+        if from.is_empty() {
+            return None;
+        }
+        let mut choices = vec![json!({"value": "", "title": "—"})];
+        choices.extend(from.into_iter().map(|c| json!({"value": c, "title": c})));
+        Some(json!({"id": id, "kind": "select", "label": label, "value": "", "choices": choices}))
+    };
+    let not_in = |all: Vec<String>, these: &[String]| -> Vec<String> {
+        all.into_iter().filter(|x| !these.contains(x)).collect()
+    };
+    let (all_labels, people) = (names(&m["choices"]["labels"], None), names(&m["choices"]["people"], None));
+    let author = m["author"].as_str().unwrap_or_default().to_string();
+    let mut fields = vec![json!({"id": "title", "kind": "text", "label": "Title", "value": m["title"]})];
+    fields.extend(pick("add_label", "Add a label", not_in(all_labels, &labels)));
+    fields.extend(pick("remove_label", "Remove a label", labels.clone()));
+    fields.extend(pick("assign", "Assign", not_in(people.clone(), &assignees)));
+    fields.extend(pick("unassign", "Unassign", assignees.clone()));
+    if pull && open {
+        let can_review: Vec<String> = not_in(people, &reviewers).into_iter().filter(|p| *p != author).collect();
+        fields.extend(pick("request_review", "Request a review from", can_review));
+        fields.extend(pick("unrequest_review", "Withdraw a review request", reviewers));
+    }
+    out.push(json!({"type": "form", "id": "meta", "submit": "Save", "fields": fields}));
+    out
+}
+
+/// The comment box under a PR's or an issue's conversation.
+fn comment_box(view: &Value) -> Vec<Value> {
+    if !view["thread"].is_object() {
+        return vec![];
+    }
+    vec![json!({"type": "form", "id": "comment", "submit": "Comment",
+                "fields": [{"id": "body", "kind": "text", "label": "Add a comment", "value": ""}]})]
 }
 
 fn short(sha: &Value) -> String {
@@ -442,6 +568,34 @@ mod tests {
             [json!({"type": "text", "id": "pr-status",
                     "markdown": "_GitHub didn't say where this PR stands: Resource not accessible by integration_"})]
         );
+    }
+
+    #[test]
+    fn a_pages_state_buttons_and_form_follow_it() {
+        let meta = |state: &str, merged: bool, can_write: bool| {
+            json!({"id": "PR_1", "title": "Fix the thing", "author": "patchbay", "state": state, "state_reason": null,
+                   "merged": merged, "draft": false, "labels": [], "assignees": [], "reviewers": ["loupe"],
+                   "head": {"branch": "fix", "same_repo": true, "exists": false}, "can_write": can_write,
+                   "choices": {"labels": ["bug"], "people": ["james", "loupe", "patchbay"]}})
+        };
+        let mut v = pull();
+        v["meta"] = meta("closed", false, true);
+        let out = manage(&v);
+        assert_eq!(out[0]["markdown"], "**Review requested from** loupe");
+        assert_eq!(out[1]["buttons"], json!([{"id": "reopen", "title": "Reopen", "tone": "info"}]));
+        // a closed PR takes no review requests; nothing to take off leaves its field out
+        let ids: Vec<&str> = out[2]["fields"].as_array().unwrap().iter().map(|f| f["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["title", "add_label", "assign"]);
+        // without write: what it says, and nothing to press
+        v["meta"] = meta("open", false, false);
+        assert_eq!(manage(&v).len(), 1);
+        // an issue says its state, and how it closed
+        let mut issue = json!({"kind": "issue", "issue": {"number": 9}, "thread": {}});
+        issue["meta"] = meta("closed", false, true);
+        issue["meta"]["state_reason"] = json!("not_planned");
+        issue["meta"]["reviewers"] = json!([]);
+        assert_eq!(manage(&issue)[0]["markdown"], "**Closed** as not planned");
+        assert_eq!(manage(&issue)[1]["buttons"][0]["id"], "reopen");
     }
 
     /// What the SDK's show sends when the thread grows: the new comment and the subtitle, in place.

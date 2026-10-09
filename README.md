@@ -81,9 +81,18 @@ own viewer: `[[panes]] id = "view"`, opened with `{"url": "<a GitHub link>"}`.
     login), on the head the pane showed: a merge never takes a commit pushed since. The pane shows
     GitHub's answer at once. What GitHub refuses comes back with GitHub's reason, such as "Pull Request is
     not mergeable".
+- A PR's or an issue's page beyond its conversation (`manage` in pane.rs), as GitHub's own page has it:
+  - `meta-line`: its labels, assignees and review requests (an issue's state too, and how it closed).
+  - `state`, for a login that may write: **Close** (asking first) or **Reopen**; a PR's **Convert to draft**
+    or **Ready for review**, **Update branch** while it's behind its base, and **Delete branch** once it's
+    merged or closed (asking first); an issue's **Close as completed** or **Close as not planned**.
+  - `meta`, a form: the title, a label to add or take off, someone to assign or unassign, and (an open
+    PR's) a review to request or withdraw. A field left at "—" changes nothing; the title only when it
+    changed.
+  - `comment`, under the conversation: a comment, as GitHub's comment box.
 - Each open pane asks GitHub again every minute and sends only what changed (the SDK's `show`), so a new
   comment slides in and the open tab and scroll stay put. A tab's `select` is the app's; any other input
-  is refused with why.
+  is refused with why. Every write goes to GitHub as this machine's login, and GitHub's answer shows at once.
 
 ## Building
 

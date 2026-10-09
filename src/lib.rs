@@ -16,10 +16,15 @@
 //!           reviews: [{author, state, body, submitted_at, url}],  // a PR's
 //!           review_comments: [{author, body, created_at, path, line, url, in_reply_to, review_id}]} | null,
 //!  merge: {viewer, methods, can_merge, mergeable, state, review, draft, authored, my_review, base,
-//!          checks: {state, passed, failed, pending}} | {error} | null}   // an open PR's, as this login
+//!          checks: {state, passed, failed, pending}} | {error} | null,  // an open PR's, as this login
+//!  meta: {id, title, author, state, state_reason, merged, draft, labels: [{name, color}], assignees,
+//!         reviewers, head: {branch, same_repo, exists}, can_write,
+//!         choices: {labels, people}} | {error} | null}                    // a PR's or an issue's
 //! ```
 //!
-//! An open PR can be reviewed and merged from the viewer (`review`, `merge`), as the login that asks.
+//! What a PR's or an issue's page does, the viewer does too, as the login that asks: review and merge
+//! (`review`, `merge`), close and reopen (`set_state`), draft and ready, update and delete the branch,
+//! comment, and the title, labels, assignees and review requests (`edit_meta`).
 
 pub mod install;
 pub mod pane;
@@ -29,7 +34,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
@@ -42,6 +47,8 @@ pub const TEXT_MAX: usize = 512 * 1024;
 pub const FILES_MAX: usize = 300;
 /// How long an answer is kept, as core keeps link pills.
 const KEEP: Duration = Duration::from_secs(60);
+/// How long a repo's labels, assignable people and this login's permission are kept.
+const CHOICES_KEEP: Duration = Duration::from_secs(600);
 /// How long one `gh api` call may take.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -413,8 +420,20 @@ impl GitHub {
 
     /// Marks a draft PR (by its GraphQL id) ready for review: a draft can't merge.
     pub fn ready(&self, pr_id: &str) -> anyhow::Result<()> {
-        let query = "query=mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { \
-                     pullRequest { isDraft } } }";
+        self.pr_mutation("markPullRequestReadyForReview", pr_id)
+    }
+
+    /// Turns a PR (by its GraphQL id) back into a draft.
+    pub fn draft(&self, pr_id: &str) -> anyhow::Result<()> {
+        self.pr_mutation("convertPullRequestToDraft", pr_id)
+    }
+
+    /// A GraphQL mutation that takes a PR's id alone (`{pullRequestId}`) and answers with the PR.
+    fn pr_mutation(&self, mutation: &str, pr_id: &str) -> anyhow::Result<()> {
+        let query = format!(
+            "query=mutation($id: ID!) {{ {mutation}(input: {{pullRequestId: $id}}) {{ pullRequest {{ isDraft }} }} }}"
+        );
+        let query = query.as_str();
         let id = format!("id={pr_id}");
         let (out, _) = self
             .call_with("graphql", &["-f", query, "-f", &id], None, false, 1 << 20)
@@ -444,6 +463,164 @@ impl GitHub {
         Ok(())
     }
 
+    /// Closes or reopens a PR or an issue; an issue closes as `completed` or `not_planned`.
+    pub fn set_state(
+        &self,
+        repo: &str,
+        number: u64,
+        pull: bool,
+        open: bool,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut change = json!({"state": if open { "open" } else { "closed" }});
+        if let Some(reason) = reason.filter(|_| !pull && !open) {
+            if !matches!(reason, "completed" | "not_planned") {
+                bail!("{reason} isn't a way to close an issue: completed or not_planned");
+            }
+            change["state_reason"] = json!(reason);
+        }
+        let kind = if pull { "pulls" } else { "issues" };
+        self.send("PATCH", &format!("repos/{repo}/{kind}/{number}"), &change)?;
+        Ok(())
+    }
+
+    /// Brings a PR's branch up to date with its base, only while its head is still `sha`.
+    pub fn update_branch(&self, repo: &str, number: u64, sha: &str) -> anyhow::Result<()> {
+        self.send("PUT", &format!("repos/{repo}/pulls/{number}/update-branch"), &json!({"expected_head_sha": sha}))?;
+        Ok(())
+    }
+
+    /// Deletes a branch of the repo, as GitHub's "Delete branch" after a merge.
+    pub fn delete_branch(&self, repo: &str, branch: &str) -> anyhow::Result<()> {
+        let path = branch.split('/').map(encode).collect::<Vec<_>>().join("/");
+        self.send("DELETE", &format!("repos/{repo}/git/refs/heads/{path}"), &json!({}))?;
+        Ok(())
+    }
+
+    /// A comment on a PR's or an issue's conversation.
+    pub fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<()> {
+        self.send("POST", &format!("repos/{repo}/issues/{number}/comments"), &json!({"body": body}))?;
+        Ok(())
+    }
+
+    /// A PR's or an issue's title, labels, assignees and (a PR's) review requests: each field of `changes`
+    /// that's there and not empty, one change at a time, as GitHub's page makes them.
+    pub fn edit_meta(&self, repo: &str, number: u64, changes: &Value) -> anyhow::Result<()> {
+        let text = |k: &str| changes[k].as_str().map(str::trim).filter(|s| !s.is_empty());
+        let issue = format!("repos/{repo}/issues/{number}");
+        let mut done = 0;
+        if let Some(title) = text("title") {
+            self.send("PATCH", &issue, &json!({"title": title}))?;
+            done += 1;
+        }
+        if let Some(label) = text("add_label") {
+            self.send("POST", &format!("{issue}/labels"), &json!({"labels": [label]}))?;
+            done += 1;
+        }
+        if let Some(label) = text("remove_label") {
+            self.send("DELETE", &format!("{issue}/labels/{}", encode(label)), &json!({}))?;
+            done += 1;
+        }
+        if let Some(who) = text("assign") {
+            self.send("POST", &format!("{issue}/assignees"), &json!({"assignees": [who]}))?;
+            done += 1;
+        }
+        if let Some(who) = text("unassign") {
+            self.send("DELETE", &format!("{issue}/assignees"), &json!({"assignees": [who]}))?;
+            done += 1;
+        }
+        let reviews = format!("repos/{repo}/pulls/{number}/requested_reviewers");
+        if let Some(who) = text("request_review") {
+            self.send("POST", &reviews, &json!({"reviewers": [who]}))?;
+            done += 1;
+        }
+        if let Some(who) = text("unrequest_review") {
+            self.send("DELETE", &reviews, &json!({"reviewers": [who]}))?;
+            done += 1;
+        }
+        if done == 0 {
+            bail!("nothing to change");
+        }
+        Ok(())
+    }
+
+    /// A repo's labels and the people its issues can go to, and whether this login may write to it: what
+    /// a PR's or an issue's page offers, kept ten minutes per repo and login.
+    fn choices(&self, repo: &str) -> anyhow::Result<Value> {
+        static KEPT: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
+        let kept = KEPT.get_or_init(Mutex::default);
+        let who = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.token.hash(&mut h);
+            h.finish()
+        };
+        let key = format!("{repo} {who:x}");
+        if let Some((at, v)) = kept.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            if at.elapsed() < CHOICES_KEEP {
+                return Ok(v.clone());
+            }
+        }
+        let r = self.json(&format!("repos/{repo}"))?;
+        let mut labels: Vec<String> = self
+            .list(&format!("repos/{repo}/labels"))?
+            .iter()
+            .filter_map(|l| l["name"].as_str())
+            .map(String::from)
+            .collect();
+        labels.sort_by_key(|l| l.to_lowercase());
+        let mut people: Vec<String> = self
+            .list(&format!("repos/{repo}/assignees"))?
+            .iter()
+            .filter_map(|p| p["login"].as_str())
+            .map(String::from)
+            .collect();
+        people.sort_by_key(|p| p.to_lowercase());
+        let p = &r["permissions"];
+        let v = json!({"can_write": p["push"] == true || p["maintain"] == true || p["admin"] == true,
+                       "labels": labels, "people": people});
+        kept.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (Instant::now(), v.clone()));
+        Ok(v)
+    }
+
+    /// A PR's or an issue's page beyond its conversation: its state, labels, assignees, review requests and
+    /// branch, and what can be chosen for them.
+    fn meta(&self, repo: &str, d: &Value, pull: bool) -> anyhow::Result<Value> {
+        let logins = |v: &Value| -> Vec<Value> {
+            v.as_array().into_iter().flatten().filter_map(|u| u["login"].as_str()).map(|l| json!(l)).collect()
+        };
+        let labels: Vec<Value> = d["labels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|l| json!({"name": l["name"], "color": l["color"]}))
+            .collect();
+        let mut out = json!({
+            "id": d["node_id"], "title": d["title"], "author": d["user"]["login"], "state": d["state"],
+            "state_reason": d.get("state_reason").cloned().unwrap_or(Value::Null),
+            "merged": d["merged"] == true, "draft": d["draft"] == true, "labels": labels,
+            "assignees": logins(&d["assignees"]), "reviewers": logins(&d["requested_reviewers"]), "head": null,
+        });
+        if pull {
+            let branch = d["head"]["ref"].as_str().unwrap_or_default();
+            let same_repo = d["head"]["repo"]["full_name"] == repo;
+            // after a merge or a close, whether its branch is still there to delete
+            let exists = d["state"] == "open"
+                || (same_repo
+                    && self
+                        .json(&format!(
+                            "repos/{repo}/branches/{}",
+                            branch.split('/').map(encode).collect::<Vec<_>>().join("/")
+                        ))
+                        .is_ok());
+            out["head"] = json!({"branch": branch, "same_repo": same_repo, "exists": exists});
+        }
+        let choices = self.choices(repo)?;
+        out["can_write"] = choices["can_write"].clone();
+        out["choices"] = json!({"labels": choices["labels"], "people": choices["people"]});
+        Ok(out)
+    }
+
     /// What the viewer shows for a link.
     pub fn view(&self, link: &Link) -> anyhow::Result<Value> {
         let repo = &link.repo;
@@ -457,6 +634,7 @@ impl GitHub {
                 out["pull"] = pull(&d, d["merged"].as_bool() == Some(true));
                 out["files"] = Value::Array(self.pull_files(repo, link.reference.parse()?)?);
                 out["thread"] = self.thread(repo, &d, true)?;
+                out["meta"] = self.meta(repo, &d, true).unwrap_or_else(|e| json!({"error": said(&e)}));
                 // an open PR: what this login may do with it (an answer that fails says why, in place)
                 if d["state"] == "open" && d["merged"] != true {
                     out["merge"] = match self.merge_status(repo, link.reference.parse()?) {
@@ -471,6 +649,7 @@ impl GitHub {
                 out["ref"] = Value::Null;
                 out["issue"] = json!({"number": d["number"], "title": d["title"], "state": d["state"]});
                 out["thread"] = self.thread(repo, &d, false)?;
+                out["meta"] = self.meta(repo, &d, false).unwrap_or_else(|e| json!({"error": said(&e)}));
             }
             "commit" => {
                 let d = self.json(&format!("repos/{repo}/commits/{}", link.reference)).map_err(not_there("commit"))?;

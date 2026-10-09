@@ -98,34 +98,42 @@ fn shown(p: &Pane, got: &Value, titles: &Titles) {
     }
 }
 
-/// A button or the review form on an open PR's pane: GitHub approves, merges or takes the review as this
-/// machine's login (the vault's account, else its own gh login), on the head the pane showed, and the pane
-/// shows GitHub's answer at once. What GitHub refuses comes back with its reason.
+/// A button or a form on a PR's or an issue's pane, as its page on GitHub does it: approve, merge or review
+/// an open PR (on the head the pane showed); close or reopen, draft or ready, update or delete the branch;
+/// its title, labels, assignees and review requests; a comment. GitHub does it as this machine's login (the
+/// vault's account, else its own gh login), and the pane shows GitHub's answer at once. What GitHub refuses
+/// comes back with its reason.
 fn act(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, titles: &Titles, p: &Pane, event: &Value) -> anyhow::Result<()> {
     let refuse = |why: String| -> anyhow::Result<()> { Err(Refused::new(why).into()) };
     let (kind, block) = (event["kind"].as_str().unwrap_or_default(), event["block"].as_str().unwrap_or_default());
-    if !matches!((kind, block), ("tap", "pr-actions") | ("submit", "pr-review")) {
+    let pr_only = matches!((kind, block), ("tap", "pr-actions") | ("submit", "pr-review"));
+    let page = matches!((kind, block), ("tap", "state") | ("submit", "meta") | ("submit", "comment"));
+    if !pr_only && !page {
         return refuse(format!("the GitHub view has nothing to do for {kind} on {block}"));
     }
     let link = match parse(p.target()["url"].as_str().unwrap_or_default()) {
-        Ok(link) if link.kind == "pull" => link,
-        _ => return refuse("only a PR is reviewed or merged here".into()),
+        Ok(link) if link.kind == "pull" || (page && link.kind == "issue") => link,
+        _ if pr_only => return refuse("only a PR is reviewed or merged here".into()),
+        _ => return refuse("only a PR or an issue is changed here".into()),
     };
     let shown_now = match view(h, vault, kept, &link, false) {
         Ok(v) => v,
         Err(e) => return refuse(format!("{e:#}")),
     };
-    if !shown_now["merge"].is_object() {
+    if pr_only && !shown_now["merge"].is_object() {
         return refuse(format!("PR #{} isn't open", link.reference));
     }
+    let pull = link.kind == "pull";
     let sha = shown_now["ref"].as_str().unwrap_or_default().to_string();
     let number: u64 = link.reference.parse()?;
     let Some(gh) = cli(h) else { return refuse("GitHub's CLI isn't on this machine yet".into()) };
     let github = GitHub::new(gh).token(vault.lock().unwrap_or_else(|e| e.into_inner()).token(h));
     let value = &event["value"];
-    let done = match (kind, value.as_str()) {
-        ("tap", Some("approve")) => github.review(&link.repo, number, "APPROVE", "", &sha),
-        ("tap", Some(b)) if b.starts_with("merge:") => {
+    let meta = &shown_now["meta"];
+    let pr_id = meta["id"].as_str().unwrap_or_default();
+    let done = match (block, value.as_str()) {
+        ("pr-actions", Some("approve")) => github.review(&link.repo, number, "APPROVE", "", &sha),
+        ("pr-actions", Some(b)) if b.starts_with("merge:") => {
             // a forced merge of a draft marks it ready first: GitHub merges no draft
             let merge = &shown_now["merge"];
             let ready = match merge["id"].as_str() {
@@ -134,7 +142,7 @@ fn act(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, titles: &Titles, p: &Pane,
             };
             ready.and_then(|_| github.merge(&link.repo, number, &b["merge:".len()..], &sha))
         }
-        ("submit", _) => {
+        ("pr-review", _) => {
             let kind = value["event"].as_str().unwrap_or("COMMENT");
             let body = value["body"].as_str().unwrap_or_default();
             if kind != "APPROVE" && body.trim().is_empty() {
@@ -142,7 +150,33 @@ fn act(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, titles: &Titles, p: &Pane,
             }
             github.review(&link.repo, number, kind, body, &sha)
         }
-        _ => return refuse(format!("{value} isn't one of this PR's buttons")),
+        ("state", Some("close")) => github.set_state(&link.repo, number, pull, false, None),
+        ("state", Some(b)) if b.starts_with("close:") && !pull => {
+            github.set_state(&link.repo, number, false, false, Some(&b["close:".len()..]))
+        }
+        ("state", Some("reopen")) => github.set_state(&link.repo, number, pull, true, None),
+        ("state", Some("draft")) if pull => github.draft(pr_id),
+        ("state", Some("ready")) if pull => github.ready(pr_id),
+        ("state", Some("update-branch")) if pull => github.update_branch(&link.repo, number, &sha),
+        ("state", Some("delete-branch")) if pull && meta["head"]["same_repo"] == true => {
+            github.delete_branch(&link.repo, meta["head"]["branch"].as_str().unwrap_or_default())
+        }
+        ("meta", _) => {
+            // the title only when it changed; the rest as chosen
+            let mut changes = value.clone();
+            if changes["title"].as_str().map(str::trim) == meta["title"].as_str().map(str::trim) {
+                changes["title"] = Value::Null;
+            }
+            github.edit_meta(&link.repo, number, &changes)
+        }
+        ("comment", _) => {
+            let body = value["body"].as_str().map(str::trim).unwrap_or_default();
+            if body.is_empty() {
+                return refuse("a comment needs words".into());
+            }
+            github.comment(&link.repo, number, body)
+        }
+        _ => return refuse(format!("{value} isn't one of this page's buttons")),
     };
     if let Err(e) = done {
         return refuse(said(&e));
