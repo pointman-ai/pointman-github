@@ -1,0 +1,1 @@
+A throwaway draft for the GitHub pane's force-merge test (Pointman thread 6117).
