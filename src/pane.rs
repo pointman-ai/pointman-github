@@ -228,7 +228,7 @@ pub fn fit(mut blocks: Value, max: usize) -> Value {
     }
     let mut patches = Vec::new();
     find_patches(&blocks, String::new(), &mut patches);
-    patches.sort_by(|a, b| b.1.cmp(&a.1));
+    patches.sort_by_key(|p| std::cmp::Reverse(p.1));
     let mut dropped = 0;
     for (at, len) in patches {
         if size <= max {
