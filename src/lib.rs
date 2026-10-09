@@ -352,20 +352,10 @@ impl GitHub {
         Ok(self.list(&format!("repos/{repo}/pulls/{number}/files"))?.iter().map(changed).collect())
     }
 
-    /// A PR's or an issue's conversation: its description, comments, and a PR's reviews and their comments
-    /// on lines, each oldest first.
-    fn thread(&self, repo: &str, d: &Value, is_pull: bool) -> anyhow::Result<Value> {
-        let n = d["number"].as_u64().unwrap_or_default();
-        let comments = self.list(&format!("repos/{repo}/issues/{n}/comments"))?;
-        let (reviews, on_lines) = if is_pull {
-            (
-                self.list(&format!("repos/{repo}/pulls/{n}/reviews"))?,
-                self.list(&format!("repos/{repo}/pulls/{n}/comments"))?,
-            )
-        } else {
-            (vec![], vec![])
-        };
-        Ok(json!({
+    /// A PR's or an issue's conversation, from it (`d`) and its lists as GitHub gave them: its
+    /// description, comments, and a PR's reviews and their comments on lines.
+    fn thread_of(d: &Value, comments: &[Value], reviews: &[Value], on_lines: &[Value]) -> Value {
+        json!({
             "author": d["user"]["login"], "body": d["body"], "created_at": d["created_at"], "url": d["html_url"],
             "comments": comments.iter().map(|c| json!({"author": c["user"]["login"], "body": c["body"],
                                                       "created_at": c["created_at"], "url": c["html_url"]}))
@@ -379,7 +369,7 @@ impl GitHub {
                 "url": c["html_url"], "in_reply_to": c.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
                 "review_id": c.get("pull_request_review_id").cloned().unwrap_or(Value::Null)}))
                 .collect::<Vec<_>>(),
-        }))
+        })
     }
 
     /// A request with a JSON body (`-X POST`, `PUT`…), for what changes GitHub: its answer, or GitHub's own
@@ -561,20 +551,16 @@ impl GitHub {
                 return Ok(v.clone());
             }
         }
-        let r = self.json(&format!("repos/{repo}"))?;
-        let mut labels: Vec<String> = self
-            .list(&format!("repos/{repo}/labels"))?
-            .iter()
-            .filter_map(|l| l["name"].as_str())
-            .map(String::from)
-            .collect();
+        let (r, labels, people) = std::thread::scope(|s| {
+            let r = s.spawn(|| self.json(&format!("repos/{repo}")));
+            let labels = s.spawn(|| self.list(&format!("repos/{repo}/labels")));
+            let people = s.spawn(|| self.list(&format!("repos/{repo}/assignees")));
+            (joined(r), joined(labels), joined(people))
+        });
+        let r = r?;
+        let mut labels: Vec<String> = labels?.iter().filter_map(|l| l["name"].as_str()).map(String::from).collect();
         labels.sort_by_key(|l| l.to_lowercase());
-        let mut people: Vec<String> = self
-            .list(&format!("repos/{repo}/assignees"))?
-            .iter()
-            .filter_map(|p| p["login"].as_str())
-            .map(String::from)
-            .collect();
+        let mut people: Vec<String> = people?.iter().filter_map(|p| p["login"].as_str()).map(String::from).collect();
         people.sort_by_key(|p| p.to_lowercase());
         let p = &r["permissions"];
         let v = json!({"can_write": p["push"] == true || p["maintain"] == true || p["admin"] == true,
@@ -585,7 +571,14 @@ impl GitHub {
 
     /// A PR's or an issue's page beyond its conversation: its state, labels, assignees, review requests and
     /// branch, and what can be chosen for them.
-    fn meta(&self, repo: &str, d: &Value, pull: bool) -> anyhow::Result<Value> {
+    fn meta(
+        &self,
+        repo: &str,
+        d: &Value,
+        pull: bool,
+        choices: anyhow::Result<Value>,
+        branch_exists: Option<bool>,
+    ) -> anyhow::Result<Value> {
         let logins = |v: &Value| -> Vec<Value> {
             v.as_array().into_iter().flatten().filter_map(|u| u["login"].as_str()).map(|l| json!(l)).collect()
         };
@@ -605,17 +598,16 @@ impl GitHub {
             let branch = d["head"]["ref"].as_str().unwrap_or_default();
             let same_repo = d["head"]["repo"]["full_name"] == repo;
             // after a merge or a close, whether its branch is still there to delete
+            // the merge status says (GitHub has no head ref once the branch is deleted), else GitHub's branch
             let exists = d["state"] == "open"
                 || (same_repo
-                    && self
-                        .json(&format!(
-                            "repos/{repo}/branches/{}",
-                            branch.split('/').map(encode).collect::<Vec<_>>().join("/")
-                        ))
-                        .is_ok());
+                    && branch_exists.unwrap_or_else(|| {
+                        let path = branch.split('/').map(encode).collect::<Vec<_>>().join("/");
+                        self.json(&format!("repos/{repo}/branches/{path}")).is_ok()
+                    }));
             out["head"] = json!({"branch": branch, "same_repo": same_repo, "exists": exists});
         }
-        let choices = self.choices(repo)?;
+        let choices = choices?;
         out["can_write"] = choices["can_write"].clone();
         out["choices"] = json!({"labels": choices["labels"], "people": choices["people"]});
         Ok(out)
@@ -628,28 +620,55 @@ impl GitHub {
                              "file": null, "files": [], "thread": null, "lines": link.lines});
         match link.kind {
             "pull" => {
-                let d = self.json(&format!("repos/{repo}/pulls/{}", link.reference)).map_err(not_there("PR"))?;
+                // every call at once: each waits on GitHub (0.4–0.9 s a call from the Mac), not on the others,
+                // so a PR shows in about one call's time rather than nine
+                let n: u64 = link.reference.parse()?;
+                let (d, files, comments, reviews, on_lines, merge, choices) = std::thread::scope(|s| {
+                    let d = s.spawn(|| self.json(&format!("repos/{repo}/pulls/{n}")));
+                    let files = s.spawn(|| self.pull_files(repo, n));
+                    let comments = s.spawn(|| self.list(&format!("repos/{repo}/issues/{n}/comments")));
+                    let reviews = s.spawn(|| self.list(&format!("repos/{repo}/pulls/{n}/reviews")));
+                    let on_lines = s.spawn(|| self.list(&format!("repos/{repo}/pulls/{n}/comments")));
+                    let merge = s.spawn(|| self.merge_status(repo, n));
+                    let choices = s.spawn(|| self.choices(repo));
+                    (
+                        joined(d),
+                        joined(files),
+                        joined(comments),
+                        joined(reviews),
+                        joined(on_lines),
+                        joined(merge),
+                        joined(choices),
+                    )
+                });
+                let d = d.map_err(not_there("PR"))?;
                 out["title"] = d["title"].clone();
                 out["ref"] = d["head"]["sha"].clone();
                 out["pull"] = pull(&d, d["merged"].as_bool() == Some(true));
-                out["files"] = Value::Array(self.pull_files(repo, link.reference.parse()?)?);
-                out["thread"] = self.thread(repo, &d, true)?;
-                out["meta"] = self.meta(repo, &d, true).unwrap_or_else(|e| json!({"error": said(&e)}));
+                out["files"] = Value::Array(files?);
+                out["thread"] = Self::thread_of(&d, &comments?, &reviews?, &on_lines?);
+                let branch_exists = merge.as_ref().ok().and_then(|m| m["branch_exists"].as_bool());
+                out["meta"] =
+                    self.meta(repo, &d, true, choices, branch_exists).unwrap_or_else(|e| json!({"error": said(&e)}));
                 // an open PR: what this login may do with it (an answer that fails says why, in place)
                 if d["state"] == "open" && d["merged"] != true {
-                    out["merge"] = match self.merge_status(repo, link.reference.parse()?) {
-                        Ok(m) => m,
-                        Err(e) => json!({"error": said(&e)}),
-                    };
+                    out["merge"] = merge.unwrap_or_else(|e| json!({"error": said(&e)}));
                 }
             }
             "issue" => {
-                let d = self.json(&format!("repos/{repo}/issues/{}", link.reference)).map_err(not_there("issue"))?;
+                let n: u64 = link.reference.parse()?;
+                let (d, comments, choices) = std::thread::scope(|s| {
+                    let d = s.spawn(|| self.json(&format!("repos/{repo}/issues/{n}")));
+                    let comments = s.spawn(|| self.list(&format!("repos/{repo}/issues/{n}/comments")));
+                    let choices = s.spawn(|| self.choices(repo));
+                    (joined(d), joined(comments), joined(choices))
+                });
+                let d = d.map_err(not_there("issue"))?;
                 out["title"] = d["title"].clone();
                 out["ref"] = Value::Null;
                 out["issue"] = json!({"number": d["number"], "title": d["title"], "state": d["state"]});
-                out["thread"] = self.thread(repo, &d, false)?;
-                out["meta"] = self.meta(repo, &d, false).unwrap_or_else(|e| json!({"error": said(&e)}));
+                out["thread"] = Self::thread_of(&d, &comments?, &[], &[]);
+                out["meta"] = self.meta(repo, &d, false, choices, None).unwrap_or_else(|e| json!({"error": said(&e)}));
             }
             "commit" => {
                 let d = self.json(&format!("repos/{repo}/commits/{}", link.reference)).map_err(not_there("commit"))?;
@@ -699,7 +718,7 @@ impl GitHub {
 /// permission, and the PR's mergeability, review decision and its head's checks.
 const MERGE_QUERY: &str = "query($owner: String!, $name: String!, $number: Int!) { viewer { login } \
     repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission \
-    pullRequest(number: $number) { id mergeable mergeStateStatus reviewDecision isDraft viewerDidAuthor baseRefName \
+    pullRequest(number: $number) { id mergeable mergeStateStatus reviewDecision isDraft viewerDidAuthor baseRefName headRef { name } \
     viewerLatestReview { state } commits(last: 1) { nodes { commit { oid statusCheckRollup { state \
     contexts(first: 100) { nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }";
 
@@ -740,6 +759,7 @@ pub fn merge_of(data: &Value) -> Value {
         "mergeable": pr["mergeable"], "state": pr["mergeStateStatus"], "review": pr["reviewDecision"],
         "draft": pr["isDraft"], "authored": pr["viewerDidAuthor"], "my_review": pr["viewerLatestReview"]["state"],
         "base": pr["baseRefName"], "head": pr["commits"]["nodes"][0]["commit"]["oid"],
+        "branch_exists": pr["headRef"].is_object(),
         "checks": {"state": rollup["state"], "passed": passed, "failed": failed, "pending": pending},
     })
 }
@@ -775,6 +795,11 @@ pub fn said(e: &anyhow::Error) -> String {
     } else {
         line
     }
+}
+
+/// A call's answer from its thread (one that panicked, as an error).
+fn joined<T>(h: std::thread::ScopedJoinHandle<'_, anyhow::Result<T>>) -> anyhow::Result<T> {
+    h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("a call to GitHub failed unexpectedly")))
 }
 
 fn not_there(what: &'static str) -> impl Fn(anyhow::Error) -> anyhow::Error {
@@ -844,7 +869,8 @@ mod tests {
             merge_of(&data),
             json!({"viewer": "james", "id": "PR_1", "methods": ["merge", "rebase"], "can_merge": true, "mergeable": "MERGEABLE",
                    "state": "BLOCKED", "review": "REVIEW_REQUIRED", "draft": false, "authored": true, "my_review": "COMMENTED",
-                   "base": "main", "head": "abc", "checks": {"state": "PENDING", "passed": 1, "failed": 2, "pending": 1}})
+                   "base": "main", "head": "abc", "branch_exists": false,
+                   "checks": {"state": "PENDING", "passed": 1, "failed": 2, "pending": 1}})
         );
         let read_only = json!({"repository": {"viewerPermission": "READ", "pullRequest": {}}});
         assert_eq!(merge_of(&read_only)["can_merge"], false);

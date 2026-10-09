@@ -66,7 +66,7 @@ esac
                "squashMergeAllowed": false, "rebaseMergeAllowed": true, "viewerPermission": "ADMIN",
                "pullRequest": {"id": format!("PR_{n}"), "mergeable": "MERGEABLE",
                                "mergeStateStatus": if draft { "DRAFT" } else { "CLEAN" }, "reviewDecision": "REVIEW_REQUIRED",
-                               "isDraft": draft, "viewerDidAuthor": authored, "baseRefName": "main", "viewerLatestReview": null,
+                               "isDraft": draft, "viewerDidAuthor": authored, "headRef": {"name": format!("fix-{n}")}, "baseRefName": "main", "viewerLatestReview": null,
                                "commits": {"nodes": [{"commit": {"oid": format!("d{n}"), "statusCheckRollup": {"state": "SUCCESS",
                                    "contexts": {"nodes": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
                                                           {"__typename": "StatusContext", "state": "PENDING"}]}}}}]}}}}})
@@ -87,7 +87,7 @@ esac
     case "$n" in
       44) printf '%s\n' '{own}' ;;
       47) printf '%s\n' '{draft}' ;;
-      *) printf '%s\n' '{other}' | sed "s/\"d43\"/\"d$n\"/; s/\"PR_43\"/\"PR_$n\"/" ;;
+      *) printf '%s\n' '{other}' | sed "s/\"d43\"/\"d$n\"/; s/\"PR_43\"/\"PR_$n\"/; s/\"fix-43\"/\"fix-$n\"/" ;;
     esac ;;
   repos/a/b/pulls/4[3-9])
     n=${{2##*/}}; merged=false; state=open
