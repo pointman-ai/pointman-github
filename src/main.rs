@@ -1,10 +1,8 @@
 //! The extension's process: the node starts it (`bin/github`, from the extension's folder) and talks to it
 //! over stdin and stdout. It installs GitHub's CLI where there's none, signs GitHub accounts in from the
-//! apps into the vault, gives agents' runs the vault's token, and `github.view {url}` answers with what a
-//! GitHub link shows. The `view` pane shows the same as blocks, and keeps it current; on an open PR its
-//! buttons and review form approve, merge and review it on GitHub, as this machine's login.
+//! apps into the vault, and gives agents' runs the vault's token. GitHub's pages open in the apps' web panel
+//! (James, Pointman thread 8446).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -12,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use github::signin::SignIns;
-use github::{find_gh, install, pane, parse, said, GitHub, Kept, Link};
-use pointman_extension::{Extension, Handle, Job, Pane, Refused};
+use github::{find_gh, install};
+use pointman_extension::{Extension, Handle, Job};
 use regex::Regex;
 use serde_json::{json, Value};
 
@@ -23,8 +21,6 @@ use serde_json::{json, Value};
 /// OPEN_EVERY is asked for first.
 const LIST_EVERY: Duration = Duration::from_secs(60);
 const OPEN_EVERY: Duration = Duration::from_secs(1800);
-/// How often an open `view` pane asks GitHub again.
-const REFRESH_EVERY: Duration = Duration::from_secs(60);
 
 fn state(h: &Handle) -> PathBuf {
     PathBuf::from(h.node()["state_dir"].as_str().unwrap_or_default())
@@ -121,126 +117,9 @@ impl Vault {
     }
 }
 
-/// What a link shows: kept for a minute unless `fresh`, asked with the vault's account, else this
-/// machine's own gh login.
-fn view(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, link: &Link, fresh: bool) -> anyhow::Result<Value> {
-    if let Some(got) = kept.get(link).filter(|_| !fresh) {
-        return Ok(got);
-    }
-    let gh = cli(h).context("GitHub's CLI isn't on this machine yet: it's being installed, or set its path")?;
-    let token = vault.lock().unwrap_or_else(|e| e.into_inner()).token(h);
-    let got = GitHub::new(gh).token(token).view(link)?;
-    kept.put(link, &got);
-    Ok(got)
-}
-
-type Titles = Arc<Mutex<HashMap<String, String>>>;
-
-/// A view on its pane: the blocks (show sends what changed) and the title, when it changed.
-fn shown(p: &Pane, got: &Value, titles: &Titles) {
-    p.show(pane::blocks(got));
-    let title = pane::title(got);
-    let mut titles = titles.lock().unwrap_or_else(|e| e.into_inner());
-    if titles.get(p.id()) != Some(&title) && p.is_open() {
-        p.set_title(&title);
-        titles.insert(p.id().to_string(), title);
-    }
-}
-
-/// A button or a form on a PR's or an issue's pane, as its page on GitHub does it: approve, merge or review
-/// an open PR (on the head the pane showed); close or reopen, draft or ready, update or delete the branch;
-/// its title, labels, assignees and review requests; a comment. GitHub does it as this machine's login (the
-/// vault's account, else its own gh login), and the pane shows GitHub's answer at once. What GitHub refuses
-/// comes back with its reason.
-fn act(h: &Handle, vault: &Mutex<Vault>, kept: &Kept, titles: &Titles, p: &Pane, event: &Value) -> anyhow::Result<()> {
-    let refuse = |why: String| -> anyhow::Result<()> { Err(Refused::new(why).into()) };
-    let (kind, block) = (event["kind"].as_str().unwrap_or_default(), event["block"].as_str().unwrap_or_default());
-    let pr_only = matches!((kind, block), ("tap", "pr-actions") | ("submit", "pr-review"));
-    let page = matches!((kind, block), ("tap", "state") | ("submit", "meta") | ("submit", "comment"));
-    if !pr_only && !page {
-        return refuse(format!("the GitHub view has nothing to do for {kind} on {block}"));
-    }
-    let link = match parse(p.target()["url"].as_str().unwrap_or_default()) {
-        Ok(link) if link.kind == "pull" || (page && link.kind == "issue") => link,
-        _ if pr_only => return refuse("only a PR is reviewed or merged here".into()),
-        _ => return refuse("only a PR or an issue is changed here".into()),
-    };
-    let shown_now = match view(h, vault, kept, &link, false) {
-        Ok(v) => v,
-        Err(e) => return refuse(format!("{e:#}")),
-    };
-    if pr_only && !shown_now["merge"].is_object() {
-        return refuse(format!("PR #{} isn't open", link.reference));
-    }
-    let pull = link.kind == "pull";
-    let sha = shown_now["ref"].as_str().unwrap_or_default().to_string();
-    let number: u64 = link.reference.parse()?;
-    let Some(gh) = cli(h) else { return refuse("GitHub's CLI isn't on this machine yet".into()) };
-    let github = GitHub::new(gh).token(vault.lock().unwrap_or_else(|e| e.into_inner()).token(h));
-    let value = &event["value"];
-    let meta = &shown_now["meta"];
-    let pr_id = meta["id"].as_str().unwrap_or_default();
-    let done = match (block, value.as_str()) {
-        ("pr-actions", Some("approve")) => github.review(&link.repo, number, "APPROVE", "", &sha),
-        ("pr-actions", Some(b)) if b.starts_with("merge:") => {
-            // a forced merge of a draft marks it ready first: GitHub merges no draft
-            let merge = &shown_now["merge"];
-            let ready = match merge["id"].as_str() {
-                Some(id) if merge["draft"] == true => github.ready(id),
-                _ => Ok(()),
-            };
-            ready.and_then(|_| github.merge(&link.repo, number, &b["merge:".len()..], &sha))
-        }
-        ("pr-review", _) => {
-            let kind = value["event"].as_str().unwrap_or("COMMENT");
-            let body = value["body"].as_str().unwrap_or_default();
-            if kind != "APPROVE" && body.trim().is_empty() {
-                return refuse("a comment or a change request needs words".into());
-            }
-            github.review(&link.repo, number, kind, body, &sha)
-        }
-        ("state", Some("close")) => github.set_state(&link.repo, number, pull, false, None),
-        ("state", Some(b)) if b.starts_with("close:") && !pull => {
-            github.set_state(&link.repo, number, false, false, Some(&b["close:".len()..]))
-        }
-        ("state", Some("reopen")) => github.set_state(&link.repo, number, pull, true, None),
-        ("state", Some("draft")) if pull => github.draft(pr_id),
-        ("state", Some("ready")) if pull => github.ready(pr_id),
-        ("state", Some("update-branch")) if pull => github.update_branch(&link.repo, number, &sha),
-        ("state", Some("delete-branch")) if pull && meta["head"]["same_repo"] == true => {
-            github.delete_branch(&link.repo, meta["head"]["branch"].as_str().unwrap_or_default())
-        }
-        ("meta", _) => {
-            // the title only when it changed; the rest as chosen
-            let mut changes = value.clone();
-            if changes["title"].as_str().map(str::trim) == meta["title"].as_str().map(str::trim) {
-                changes["title"] = Value::Null;
-            }
-            github.edit_meta(&link.repo, number, &changes)
-        }
-        ("comment", _) => {
-            let body = value["body"].as_str().map(str::trim).unwrap_or_default();
-            if body.is_empty() {
-                return refuse("a comment needs words".into());
-            }
-            github.comment(&link.repo, number, body)
-        }
-        _ => return refuse(format!("{value} isn't one of this page's buttons")),
-    };
-    if let Err(e) = done {
-        return refuse(said(&e));
-    }
-    match view(h, vault, kept, &link, true) {
-        Ok(got) => shown(p, &got, titles),
-        Err(e) => h.log(format!("pane {}: couldn't ask GitHub again: {e:#}", p.id())),
-    }
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     let mut ext = Extension::new()?;
     let h = ext.handle();
-    let kept = Arc::new(Kept::default());
     let vault = Arc::new(Mutex::new(Vault::default()));
     let signins = Arc::new(SignIns::default());
 
@@ -292,50 +171,6 @@ fn main() -> anyhow::Result<()> {
         Ok(json!({"text": "A GitHub account is added in the Pointman app, so its token never goes in a post: \
                            type `/github add` there and tap Sign in."}))
     });
-
-    let (hh, v, k) = (h.clone(), vault.clone(), kept.clone());
-    ext.command("github.view", move |job: &Job| {
-        let link = parse(job.params["url"].as_str().context("url is missing")?)?;
-        view(&hh, &v, &k, &link, false)
-    });
-
-    // the `view` pane: the same, as blocks (Pointman's docs/dev/panes.md), asked again each minute; show
-    // sends only what changed, so a new comment slides in and the open tab stays put
-    let titles: Titles = Arc::default();
-    let (hh, v, k, t) = (h.clone(), vault.clone(), kept.clone(), titles.clone());
-    ext.pane("view", move |p: &Pane| {
-        let url = p.target()["url"].as_str().context("the GitHub view opens a GitHub link: its target has no url")?;
-        let got = view(&hh, &v, &k, &parse(url)?, false)?;
-        let title = pane::title(&got);
-        t.lock().unwrap_or_else(|e| e.into_inner()).insert(p.id().to_string(), title.clone());
-        let (ih, iv, ik, it) = (hh.clone(), v.clone(), k.clone(), t.clone());
-        p.on_input(move |p: &Pane, event: &Value| -> anyhow::Result<()> {
-            match event["kind"].as_str().unwrap_or_default() {
-                "select" => Ok(()), // a tab: the app shows it
-                "tap" | "submit" => act(&ih, &iv, &ik, &it, p, event),
-                kind => Err(Refused::new(format!("the GitHub view has nothing to do for {kind}")).into()),
-            }
-        });
-        let t = t.clone();
-        p.on_close(move |p: &Pane, _: &str| {
-            t.lock().unwrap_or_else(|e| e.into_inner()).remove(p.id());
-        });
-        Ok(json!({"title": title, "blocks": pane::blocks(&got)}))
-    });
-    let (v, k) = (vault, kept);
-    ext.every(
-        REFRESH_EVERY,
-        move |h: &Handle| {
-            for p in h.panes("view") {
-                let Ok(link) = parse(p.target()["url"].as_str().unwrap_or_default()) else { continue };
-                match view(h, &v, &k, &link, true) {
-                    Ok(got) => shown(&p, &got, &titles),
-                    Err(e) => h.log(format!("pane {}: couldn't ask GitHub again: {e:#}", p.id())),
-                }
-            }
-        },
-        "panes",
-    );
 
     ext.run()
 }

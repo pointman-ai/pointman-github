@@ -1,14 +1,13 @@
 # GitHub on Pointman's machines (James, Pointman thread 649 [4443], [4500], [4505]): GitHub's CLI on each
-# node, accounts for agents' runs, and the apps' GitHub viewer. The machine half of GitHub: Pointman's GitHub
-# App stays in core ([4670]–[4673]), and core's catalogue lets this repo alone take the id. The apps ask for
-# a link through core's jobs (POST /v1/workspaces/{ws}/jobs {kind: "github.view", params: {url}}) and draw
-# the answer; GitHub is asked with the vault's account, else this machine's own `gh` login.
+# node and accounts for agents' runs. The machine half of GitHub: Pointman's GitHub App stays in core
+# ([4670]–[4673]), and core's catalogue lets this repo alone take the id. GitHub's pages open in the apps' web
+# panel (James, Pointman thread 8446): the viewer, its pane and `github.view` went in 0.6.0.
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.5.0"
+version = "0.6.0"
 publisher = "aurelio"
-summary = "GitHub's CLI on this machine, and what a GitHub link shows in the apps' viewer: diffs, files, PR and issue threads, and what a PR's or an issue's page does: review, merge, close, labels, comments."
+summary = "GitHub's CLI on this machine, and GitHub accounts for agents' runs, signed in from the apps."
 node = ">=0.1,<1"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
@@ -52,18 +51,3 @@ params = { type = "object", properties = { name = { type = "string", description
 slash = "add"
 form = "account"
 summary = "Add a GitHub account for every node: sign in, or paste a token"
-
-[[commands]]
-kind = "github.view"
-title = "What a GitHub link shows"
-params = { type = "object", required = ["url"], properties = { url = { type = "string", description = "A PR, a commit, or a file at a commit (#L10-L20 for lines)" } } }
-
-# what a GitHub link shows, as a pane in the apps (Pointman's docs/dev/panes.md): a PR's conversation and
-# files, a commit's files, a file's code and how it changed, an issue's conversation; asked again each minute.
-# It opens when asked for (an agent's open_pane, a command), not on a link: a GitHub link you tap opens
-# GitHub's own page in the web panel, as other links do (James, Pointman thread 8446)
-[[panes]]
-id = "view"
-title = "GitHub"
-format = "blocks"
-opens = ["command"]
