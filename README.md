@@ -57,8 +57,10 @@ Answers are kept for a minute.
 
 ## The view pane
 
-The same, as a pane every app draws alike (Pointman's docs/dev/panes.md, MB-343), in place of the Mac's
-own viewer: `[[panes]] id = "view"`, opened with `{"url": "<a GitHub link>"}`.
+The same, as a pane every app draws alike (Pointman's docs/dev/panes.md, MB-343): `[[panes]] id = "view"`,
+opened with `{"url": "<a GitHub link>"}`. Since 0.5.0 it opens when asked for (an agent's `open_pane`, a
+command), not when someone taps a GitHub link: links open GitHub's own page in the apps' web panel, as other
+links do (James, Pointman thread 8446).
 
 - A PR: a heading (repo, number, state, files and lines changed), then tabs: **Conversation**, a
   `timeline` of the description, comments, reviews and comments on lines, oldest first, each by GitHub's
