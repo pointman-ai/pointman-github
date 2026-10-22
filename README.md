@@ -17,6 +17,9 @@ pointman add github
   `gh` instead.
 - **An account for agents' runs:** each run the node starts (Claude Code or Codex) gets the vault's GitHub
   account as `GH_TOKEN`, so `gh` works for agents on every node. With several, it's the first by label.
+- **Agents write as you there:** what they post on GitHub goes out under your account, so its guidance tells them to
+  write in your voice, with nothing about how they work with you (no "waits for your review"). What's for you
+  goes to you in Pointman.
   With none in the vault, runs use the machine's own `gh` login.
 - **Signing in from the apps:** `/github add` in any thread opens the account form. **Sign in** uses
   GitHub's device flow: open github.com/login/device on any device and enter the code the form shows, then

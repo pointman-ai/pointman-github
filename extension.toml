@@ -5,7 +5,7 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.6.1"
+version = "0.7.0"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and GitHub accounts for agents' runs, signed in from the apps."
 node = ">=0.1,<1"
@@ -19,6 +19,11 @@ runtime = "binary"
 network = true
 drives_apps = ["gh"]             # GitHub's CLI: GitHub is asked as the vault's account, else this machine's login
 secrets = ["github.*"]           # each account's token, kept in the vault as github.<label>
+
+# what agents write on GitHub goes out under that account: they're told to write it as their person (James,
+# Pointman thread 8446 [18054]: no "waits for James's review" in his name)
+[behavior]
+skill = "SKILL.md"
 
 # agents' runs get the vault's token as GH_TOKEN, so `gh` works for them on every node
 [sessions]
