@@ -11,9 +11,13 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context};
 use github::signin::SignIns;
 use github::{find_gh, install};
+use pointman_extension::protocol::{
+    CredentialsCodeRequest, CredentialsCodeResponse, CredentialsSignInRequest, CredentialsWaitRequest,
+    CredentialsWaitResponse, SessionEndedRequest, SessionEndedResponse, SessionPrepareRequest, SessionPrepareResponse,
+};
 use pointman_extension::{Extension, Handle, Job};
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::json;
 
 /// How often the vault's github.* names are looked at, and how long an opened token is kept. A list older
 /// than LIST_EVERY is still used while it's asked for again behind (each ask is a round trip to core, 0.2 s
@@ -23,7 +27,7 @@ const LIST_EVERY: Duration = Duration::from_secs(60);
 const OPEN_EVERY: Duration = Duration::from_secs(1800);
 
 fn state(h: &Handle) -> PathBuf {
-    PathBuf::from(h.node()["state_dir"].as_str().unwrap_or_default())
+    h.state_dir()
 }
 
 fn cli(h: &Handle) -> Option<PathBuf> {
@@ -60,11 +64,7 @@ fn relist(age: Option<Duration>, asking: bool) -> Relist {
 }
 
 fn list(h: &Handle) -> Option<Vec<String>> {
-    let got = h.request("secret.list", json!({"prefix": "github."})).ok()?;
-    let mut names: Vec<String> = got["names"]
-        .as_array()
-        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
-        .unwrap_or_default();
+    let mut names = h.secrets("github.").ok()?;
     names.sort();
     Some(names)
 }
@@ -137,38 +137,38 @@ fn main() -> anyhow::Result<()> {
 
     // agents' runs get the vault's token, so `gh` works for them on every node ([sessions] in extension.toml)
     let (hh, v) = (h.clone(), vault.clone());
-    ext.method("session.prepare", move |_: Value| {
-        let token = v.lock().unwrap_or_else(|e| e.into_inner()).token(&hh);
-        Ok(match token {
-            Some(t) => json!({"env": {"GH_TOKEN": t}}),
-            None => json!({}),
-        })
+    ext.on(move |_: SessionPrepareRequest| {
+        let mut answer = SessionPrepareResponse::default();
+        if let Some(token) = v.lock().unwrap_or_else(|e| e.into_inner()).token(&hh) {
+            answer.env.insert("GH_TOKEN".to_string(), token);
+        }
+        Ok(answer)
     });
-    ext.method("session.ended", |_: Value| Ok(json!({})));
+    ext.on(|_: SessionEndedRequest| Ok(SessionEndedResponse::default()));
 
     // Sign in from the apps (MB-216's sheet): GitHub's device flow
     let (hh, s) = (h.clone(), signins.clone());
-    ext.method("credentials.sign_in", move |p: Value| {
-        if p["form"] != "account" {
+    ext.on(move |p: CredentialsSignInRequest| {
+        if p.form != "account" {
             bail!("the GitHub extension signs in GitHub accounts only (form: account)");
         }
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine yet: it's being installed")?;
-        s.start(&gh, p["session"].as_str().unwrap_or_default(), Duration::from_secs(30))
+        let session = p.session.as_option().map(|s| s.value.as_str()).unwrap_or_default();
+        s.start(&gh, session, Duration::from_secs(30))
     });
     let (hh, s) = (h.clone(), signins.clone());
-    ext.method("credentials.wait", move |p: Value| {
+    ext.on(move |p: CredentialsWaitRequest| {
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine")?;
-        s.wait(&gh, p["session"].as_str().unwrap_or_default(), github::signin::WAIT)
+        let session = p.session.as_option().map(|s| s.value.as_str()).unwrap_or_default();
+        let value = s.wait(&gh, session, github::signin::WAIT)?;
+        Ok(CredentialsWaitResponse { value, ..Default::default() })
     });
     let (hh, s) = (h.clone(), signins);
-    ext.method("credentials.code", move |p: Value| {
+    ext.on(move |p: CredentialsCodeRequest| {
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine")?;
-        s.code(
-            &gh,
-            p["session"].as_str().unwrap_or_default(),
-            p["code"].as_str().unwrap_or_default(),
-            Duration::from_secs(120),
-        )
+        let session = p.session.as_option().map(|s| s.value.as_str()).unwrap_or_default();
+        let value = s.code(&gh, session, &p.code, Duration::from_secs(120))?;
+        Ok(CredentialsCodeResponse { value, ..Default::default() })
     });
 
     // `/github add` posted (an agent, an older app): the apps open the account form for it
