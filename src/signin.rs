@@ -1,7 +1,9 @@
 //! Signing a GitHub account in from the apps (James, Pointman thread 649 [4500]: sign in through the apps,
 //! the token kept in the vault for every node). GitHub's own device flow through `gh auth login --web`: the
-//! person opens github.com/login/device anywhere and enters the code it shows, then pastes that same code
-//! back in the app, which is the sign-in sheet's step (MB-216) and tells us they're done.
+//! person opens github.com/login/device anywhere and enters the code the form shows. That's all they do: the
+//! sign-in `waits` (EXT-69; James, thread 17421 [19057]), so the node asks `credentials.wait`, which answers once
+//! GitHub has said yes. A node from before that asks for the code back instead (`credentials.code`, MB-216's
+//! paste-back step), which still works: the same code, pasted.
 //!
 //! - **This machine's own gh login is never touched:** each sign-in has a config folder of its own, the
 //!   token kept in that folder's file rather than the Keychain (`--insecure-storage`), and the folder goes
@@ -110,17 +112,28 @@ impl SignIns {
             std::thread::sleep(Duration::from_millis(50));
         };
         let url = "https://github.com/login/device";
-        let prompt = format!("Enter {code} at {url}, signed in as the GitHub account to add, then paste {code} here");
+        let prompt = format!("Enter {code} at {url}, signed in as the GitHub account to add");
         self.open.lock().unwrap_or_else(|e| e.into_inner()).insert(
             session_id.to_string(),
             Session { child, config, said, code: code.clone(), started: Instant::now() },
         );
-        Ok(json!({"url": url, "prompt": prompt}))
+        Ok(json!({"url": url, "prompt": prompt, "code": code, "waits": true}))
+    }
+
+    /// The node waits for this sign-in (EXT-69): gh's token once GitHub says yes, with nothing pasted.
+    pub fn wait(&self, gh: &std::path::Path, session_id: &str, timeout: Duration) -> anyhow::Result<Value> {
+        let s = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id)
+            .ok_or_else(|| anyhow!("this sign-in has ended: start it again"))?;
+        finish(gh, s, timeout)
     }
 
     /// The person entered the code at GitHub and pasted it here: gh's token once GitHub says yes.
     pub fn code(&self, gh: &std::path::Path, session_id: &str, code: &str, timeout: Duration) -> anyhow::Result<Value> {
-        let mut s = self
+        let s = self
             .open
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -131,6 +144,13 @@ impl SignIns {
             self.open.lock().unwrap_or_else(|e| e.into_inner()).insert(session_id.to_string(), s);
             bail!("that isn't this sign-in's code: paste {again}, the one you entered at GitHub");
         }
+        finish(gh, s, timeout)
+    }
+}
+
+/// gh's token once its device flow ends with GitHub's yes; its folder, with the token's file, goes with it.
+fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Result<Value> {
+    {
         let end = Instant::now() + timeout;
         let status = loop {
             if let Some(st) = s.child.try_wait()? {

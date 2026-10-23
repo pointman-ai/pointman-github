@@ -155,6 +155,11 @@ fn main() -> anyhow::Result<()> {
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine yet: it's being installed")?;
         s.start(&gh, p["session"].as_str().unwrap_or_default(), Duration::from_secs(30))
     });
+    let (hh, s) = (h.clone(), signins.clone());
+    ext.method("credentials.wait", move |p: Value| {
+        let gh = cli(&hh).context("GitHub's CLI isn't on this machine")?;
+        s.wait(&gh, p["session"].as_str().unwrap_or_default(), github::signin::WAIT)
+    });
     let (hh, s) = (h.clone(), signins);
     ext.method("credentials.code", move |p: Value| {
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine")?;

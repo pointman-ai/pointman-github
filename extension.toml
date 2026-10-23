@@ -5,7 +5,7 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.7.0"
+version = "0.7.1"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and GitHub accounts for agents' runs, signed in from the apps."
 node = ">=0.1,<1"
