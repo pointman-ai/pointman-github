@@ -165,8 +165,8 @@ impl SignIns {
     }
 }
 
-/// gh's token once its device flow ends with GitHub's yes: the vault item's value, as the form's `value` matches.
-/// Its folder, with the token's file, goes with it.
+/// gh's token once its device flow ends with GitHub's yes: the vault item's value, the token alone as text, as a
+/// pasted one is and as the form's `value` matches. Its folder, with the token's file, goes with it.
 fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Result<String> {
     {
         let end = Instant::now() + timeout;
