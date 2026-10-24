@@ -5,10 +5,10 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.7.2"
+version = "0.8.0"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and GitHub accounts for agents' runs, signed in from the apps."
-node = ">=0.1,<1"
+node = ">=0.2.0"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]

@@ -1,6 +1,6 @@
 [package]
 name = "github"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 description = "GitHub on Pointman's nodes: gh on each machine, and GitHub accounts for agents' runs."
 license = "MIT"
