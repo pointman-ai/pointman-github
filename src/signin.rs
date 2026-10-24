@@ -148,7 +148,8 @@ impl SignIns {
     }
 }
 
-/// gh's token once its device flow ends with GitHub's yes; its folder, with the token's file, goes with it.
+/// gh's token once its device flow ends with GitHub's yes; its folder, with the token's file, goes with it. The
+/// vault item's value is the token alone, as text, as a pasted one is: the node seals only a string.
 fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Result<Value> {
     {
         let end = Instant::now() + timeout;
@@ -178,6 +179,6 @@ fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Re
             bail!("gh signed in but didn't give a token");
         }
         drop(s); // its folder, with the token's file, goes now
-        Ok(json!({"value": {"kind": "env", "vars": {"GH_TOKEN": token}}}))
+        Ok(json!({"value": token}))
     }
 }

@@ -37,7 +37,7 @@ fn a_sign_in_shows_its_code_and_waits_for_githubs_yes() {
     let prompt = started["prompt"].as_str().unwrap();
     assert!(prompt.contains("ABCD-1234") && !prompt.contains("paste"), "{prompt}");
     let got = s.wait(&gh, "sgn_1", Duration::from_secs(5)).unwrap();
-    assert_eq!(got["value"]["vars"]["GH_TOKEN"], TOKEN);
+    assert_eq!(got["value"].as_str(), Some(TOKEN), "the token alone, as text, as the node takes it");
     // once it's out, the sign-in is gone
     assert!(s.wait(&gh, "sgn_1", Duration::from_secs(1)).unwrap_err().to_string().contains("has ended"));
 }
@@ -50,5 +50,5 @@ fn an_older_node_can_still_paste_the_same_code_back() {
     let wrong = s.code(&gh, "sgn_2", "WXYZ-0000", Duration::from_secs(5)).unwrap_err().to_string();
     assert!(wrong.contains("ABCD-1234"), "{wrong}");
     let got = s.code(&gh, "sgn_2", "abcd-1234", Duration::from_secs(5)).unwrap();
-    assert_eq!(got["value"]["vars"]["GH_TOKEN"], TOKEN);
+    assert_eq!(got["value"].as_str(), Some(TOKEN), "the token alone, as text, as the node takes it");
 }
