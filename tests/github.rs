@@ -52,8 +52,8 @@ fn real_sign_in_starts() {
     let gh = gh.expect("gh on this machine");
     let signins = github::signin::SignIns::default();
     let got = signins.start(&gh, "s1", std::time::Duration::from_secs(30)).unwrap();
-    assert_eq!(got["url"], "https://github.com/login/device");
-    let prompt = got["prompt"].as_str().unwrap();
+    assert_eq!(got.url, "https://github.com/login/device");
+    let prompt = got.prompt.as_deref().unwrap();
     assert!(regex::Regex::new(r"^Enter [A-Z0-9]{4}-[A-Z0-9]{4} at ").unwrap().is_match(prompt), "{prompt}");
     let wrong = signins.code(&gh, "s1", "AAAA-AAAA", std::time::Duration::from_secs(1)).unwrap_err().to_string();
     assert!(wrong.starts_with("that isn't this sign-in's code"), "{wrong}");
@@ -71,7 +71,7 @@ fn runs_get_the_vaults_token_and_its_list_is_kept() {
         .start()
         .unwrap();
     for _ in 0..2 {
-        let got = node.call("session.prepare", json!({"client": "claude", "handle": "scene"})).unwrap();
+        let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
         assert_eq!(got, json!({"env": {"GH_TOKEN": token}}));
     }
     let asked: Vec<String> = node.asked().into_iter().map(|(method, _)| method).collect();

@@ -9,7 +9,7 @@
 //!   token kept in that folder's file rather than the Keychain (`--insecure-storage`), and the folder goes
 //!   once the token is out. gh gets no PATH, so it doesn't copy the code to this machine's clipboard or
 //!   open a browser here.
-//! - **The token** comes only out of `code`, as the payload `/secrets add` makes, for the node to seal into
+//! - **The token** comes only out of `wait` or `code`, as the vault item's value, for the node to seal into
 //!   the vault. Nothing here writes it anywhere else, logs it or keeps it.
 //! - **A sign-in waits** 15 minutes, as GitHub's device codes do, then it's dropped.
 
@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
+use pointman_extension::protocol::CredentialsSignInResponse;
 use regex::Regex;
-use serde_json::{json, Value};
 use tempfile::TempDir;
 
 pub const WAIT: Duration = Duration::from_secs(15 * 60);
@@ -57,7 +57,12 @@ impl SignIns {
     }
 
     /// Start one: GitHub's link and the code to enter there.
-    pub fn start(&self, gh: &std::path::Path, session_id: &str, timeout: Duration) -> anyhow::Result<Value> {
+    pub fn start(
+        &self,
+        gh: &std::path::Path,
+        session_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<CredentialsSignInResponse> {
         if session_id.is_empty() {
             bail!("a sign-in needs the node's session");
         }
@@ -117,11 +122,17 @@ impl SignIns {
             session_id.to_string(),
             Session { child, config, said, code: code.clone(), started: Instant::now() },
         );
-        Ok(json!({"url": url, "prompt": prompt, "code": code, "waits": true}))
+        Ok(CredentialsSignInResponse {
+            url: url.to_string(),
+            prompt: Some(prompt),
+            waits: true,
+            code: Some(code),
+            ..Default::default()
+        })
     }
 
     /// The node waits for this sign-in (EXT-69): gh's token once GitHub says yes, with nothing pasted.
-    pub fn wait(&self, gh: &std::path::Path, session_id: &str, timeout: Duration) -> anyhow::Result<Value> {
+    pub fn wait(&self, gh: &std::path::Path, session_id: &str, timeout: Duration) -> anyhow::Result<String> {
         let s = self
             .open
             .lock()
@@ -132,7 +143,13 @@ impl SignIns {
     }
 
     /// The person entered the code at GitHub and pasted it here: gh's token once GitHub says yes.
-    pub fn code(&self, gh: &std::path::Path, session_id: &str, code: &str, timeout: Duration) -> anyhow::Result<Value> {
+    pub fn code(
+        &self,
+        gh: &std::path::Path,
+        session_id: &str,
+        code: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
         let s = self
             .open
             .lock()
@@ -148,9 +165,9 @@ impl SignIns {
     }
 }
 
-/// gh's token once its device flow ends with GitHub's yes; its folder, with the token's file, goes with it. The
-/// vault item's value is the token alone, as text, as a pasted one is: the node seals only a string.
-fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Result<Value> {
+/// gh's token once its device flow ends with GitHub's yes: the vault item's value, the token alone as text, as a
+/// pasted one is and as the form's `value` matches. Its folder, with the token's file, goes with it.
+fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Result<String> {
     {
         let end = Instant::now() + timeout;
         let status = loop {
@@ -179,6 +196,6 @@ fn finish(gh: &std::path::Path, mut s: Session, timeout: Duration) -> anyhow::Re
             bail!("gh signed in but didn't give a token");
         }
         drop(s); // its folder, with the token's file, goes now
-        Ok(json!({"value": token}))
+        Ok(token)
     }
 }
