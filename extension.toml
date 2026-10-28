@@ -1,13 +1,13 @@
 # GitHub on Pointman's machines (James, Pointman thread 649 [4443], [4500], [4505]): GitHub's CLI on each
-# node and accounts for agents' runs. The machine half of GitHub: Pointman's GitHub App stays in core
-# ([4670]–[4673]), and core's catalogue lets this repo alone take the id. GitHub's pages open in the apps' web
-# panel (James, Pointman thread 8446): the viewer, its pane and `github.view` went in 0.6.0.
+# node, and agents' runs acting on GitHub as Pointman App (MB-707, thread 8446 [26244], [26267]). The machine half
+# of GitHub: the App itself is the board's ([4670]–[4673]), and core's catalogue lets this repo alone take the id.
+# GitHub's pages open in the apps' web panel (thread 8446): the viewer, its pane and `github.view` went in 0.6.0.
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.9.0"
+version = "0.10.0"
 publisher = "aurelio"
-summary = "GitHub's CLI on this machine, and GitHub accounts for agents' runs, signed in from the apps."
+summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App."
 node = ">=0.4.0"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
@@ -25,10 +25,19 @@ secrets = ["github.*"]           # each account's token, kept in the vault as gi
 [behavior]
 skill = "SKILL.md"
 
-# agents' runs get the vault's token as GH_TOKEN, so `gh` works for them on every node
+# agents' runs act on GitHub as Pointman App once the board has it (MB-707): `gh` first on their PATH asks this
+# extension for the token for the repo's owner, git asks it for GitHub's password (GIT_CONFIG_*), pushes to ssh
+# remotes go over https, and commits are the App's bot's. Before, they get the vault's token as GH_TOKEN.
 [sessions]
 clients = ["claude", "codex"]
-env = ["GH_TOKEN"]
+env = [
+  "GH_TOKEN", "PATH",
+  "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+  "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_KEY_2", "GIT_CONFIG_VALUE_2",
+  "GIT_CONFIG_KEY_3", "GIT_CONFIG_VALUE_3", "GIT_CONFIG_KEY_4", "GIT_CONFIG_VALUE_4",
+]
 
 # an account for every node: Sign in from the apps (GitHub's device flow), or paste a token
 [[credentials]]

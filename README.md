@@ -1,8 +1,8 @@
 # github
 
-A Pointman extension that puts GitHub's CLI on every node and gives agents' runs a GitHub account, signed
-in from the apps. With it, an agent on any of your machines can run `gh` (open a PR, read CI, comment on an
-issue) as the account you chose.
+A Pointman extension that puts GitHub's CLI on every node, and has agents' runs act on GitHub as Pointman App.
+With it, an agent on any of your machines can run `gh` and git (push a branch, open a PR, read CI, comment on an
+issue), and GitHub shows it as the App's bot, not as you.
 
 ```
 pointman add github
@@ -15,12 +15,19 @@ pointman add github
   [cli/cli](https://github.com/cli/cli) into its own state folder, checked against that release's
   checksums. No Homebrew, no sudo, nothing outside that folder. The `cli` setting points it at another
   `gh` instead.
-- **An account for agents' runs:** each run the node starts (Claude Code or Codex) gets the vault's GitHub
-  account as `GH_TOKEN`, so `gh` works for agents on every node. With several, it's the first by label.
-- **Agents write as you there:** what they post on GitHub goes out under your account, so its guidance tells them to
-  write in your voice, with nothing about how they work with you (no "waits for your review"). What's for you
-  goes to you in Pointman.
-  With none in the vault, runs use the machine's own `gh` login.
+- **Agents act as Pointman App:** once your board has the App installed on an account, each run the node starts
+  (Claude Code or Codex) acts on that account's repos as the App's bot:
+  - The board gives the machine an hour-long installation token for each account the App is installed on. The
+    App's key stays with the board; the extension keeps the tokens fresh in its state folder, readable only by
+    the machine's user.
+  - A `gh` first on the run's PATH runs GitHub's CLI with the token for the repo's owner: the one `-R`, a link or
+    an API path names, else the folder's `upstream`, `github` or `origin` remote, else the first installation.
+  - git asks the extension for GitHub's password over https, pushes to `git@github.com:` remotes go over https,
+    and commits are the bot's. Fetches still use the remote as it is.
+  - Its guidance tells agents to write about the change itself, with nothing about how they work with you, and to
+    tell you on the board when the App can't reach a repo, never to get around it.
+- **Before the board has the App:** each run gets the vault's GitHub account as `GH_TOKEN` (the first by label),
+  and what agents post goes out under that account. With none in the vault, runs use the machine's own `gh` login.
 - **Signing in from the apps:** `/github add` in any thread opens the account form. **Sign in** uses
   GitHub's device flow: open github.com/login/device on any device and enter the code the form shows, then
   paste that same code back into the form. Or paste a token: `gh auth token` on a machine signed in as the
@@ -32,7 +39,7 @@ once the token is out, and `gh` isn't allowed to copy the code to the clipboard 
 node. A sign-in nobody finishes is dropped after 15 minutes, as GitHub's device codes are.
 
 GitHub's own pages open in the apps' web panel, signed in as you. The workspace's GitHub connection
-(feeds of PRs and CI, `/github watch`, commit references that move tasks, link previews) is part of
+(the App, feeds of PRs and CI, `/github watch`, commit references that move tasks, link previews) is part of
 Pointman itself. The apps show the two as one GitHub: `/github watch` is Pointman's, `/github add` this
 extension's.
 
