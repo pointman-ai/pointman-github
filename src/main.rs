@@ -153,20 +153,20 @@ fn main() -> anyhow::Result<()> {
             bail!("the GitHub extension signs in GitHub accounts only (form: account)");
         }
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine yet: it's being installed")?;
-        let session = p.session.as_option().map(|s| s.value.as_str()).unwrap_or_default();
+        let session = p.session.as_option().map(|s| s.id.as_str()).unwrap_or_default();
         s.start(&gh, session, Duration::from_secs(30))
     });
     let (hh, s) = (h.clone(), signins.clone());
     ext.on(move |p: CredentialsWaitRequest| {
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine")?;
-        let session = p.session.as_option().map(|s| s.value.as_str()).unwrap_or_default();
+        let session = p.session.as_option().map(|s| s.id.as_str()).unwrap_or_default();
         let value = s.wait(&gh, session, github::signin::WAIT)?;
         Ok(CredentialsWaitResponse { value, ..Default::default() })
     });
     let (hh, s) = (h.clone(), signins);
     ext.on(move |p: CredentialsCodeRequest| {
         let gh = cli(&hh).context("GitHub's CLI isn't on this machine")?;
-        let session = p.session.as_option().map(|s| s.value.as_str()).unwrap_or_default();
+        let session = p.session.as_option().map(|s| s.id.as_str()).unwrap_or_default();
         let value = s.code(&gh, session, &p.code, Duration::from_secs(120))?;
         Ok(CredentialsCodeResponse { value, ..Default::default() })
     });
