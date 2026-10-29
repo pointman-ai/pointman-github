@@ -31,49 +31,140 @@ fn node() -> StandIn {
         .unwrap()
 }
 
-/// GitHub's pages open in the apps' web panel (James, Pointman thread 8446): no viewer here any more, and
-/// `/github add` is still the extension's.
+/// GitHub's pages open in the apps' web panel (James, Pointman thread 8446), and accounts aren't added here any
+/// more (MB-707): no viewer, no `/github add`.
 #[test]
-fn the_viewer_is_gone_and_add_stays() {
+fn the_viewer_and_add_are_gone() {
     let node = node();
     assert!(node.run("github.view", json!({"url": "https://github.com/a/b/pull/42"})).is_err());
     assert!(node.open_pane("view", json!({"url": "https://github.com/a/b/pull/42"})).is_err());
-    let added = node.run("github.add", json!({})).unwrap().result;
-    assert!(added["text"].as_str().unwrap().contains("/github add"), "{added}");
+    assert!(node.run("github.add", json!({})).is_err());
 }
 
-/// The real `gh` on this machine starts a sign-in: GitHub's link and a one-time code, which nobody enters
-/// here, so nothing is signed in. Run by hand: `cargo test --test github real_sign_in_starts -- --ignored`.
-#[test]
-#[ignore]
-fn real_sign_in_starts() {
-    let gh =
-        ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].into_iter().map(std::path::PathBuf::from).find(|p| p.exists());
-    let gh = gh.expect("gh on this machine");
-    let signins = github::signin::SignIns::default();
-    let got = signins.start(&gh, "s1", std::time::Duration::from_secs(30)).unwrap();
-    assert_eq!(got.url, "https://github.com/login/device");
-    let prompt = got.prompt.as_deref().unwrap();
-    assert!(regex::Regex::new(r"^Enter [A-Z0-9]{4}-[A-Z0-9]{4} at ").unwrap().is_match(prompt), "{prompt}");
-    let wrong = signins.code(&gh, "s1", "AAAA-AAAA", std::time::Duration::from_secs(1)).unwrap_err().to_string();
-    assert!(wrong.starts_with("that isn't this sign-in's code"), "{wrong}");
+/// Waits for the extension to write the runs' gh and what the board said.
+fn settled(state: &std::path::Path) {
+    let tokens = github::app::tokens_file(state);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(tokens.exists() && state.join("app/bin/gh").exists()) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
-/// Agents' runs get the vault's token, and the vault's list is kept: two runs starting together ask for it
-/// once (each ask is a round trip to core that a run's start waited on).
+/// Before the board has Pointman App, runs get no GitHub token at all, not even with an account in the vault: their
+/// `gh` and git say the App isn't set up, git never asks the keychain, and commits aren't the bot's.
 #[test]
-fn runs_get_the_vaults_token_and_its_list_is_kept() {
-    let token = format!("ghp_{}", "a1".repeat(18));
+fn runs_get_no_token_before_the_board_has_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = telling_gh(dir.path());
     let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
         .binary(env!("CARGO_BIN_EXE_github"))
-        .settings(json!({"cli": fake_gh().to_string_lossy()}))
-        .secret("github.work", format!("token: {token}"))
+        .settings(json!({"cli": gh.to_string_lossy()}))
+        .secret("github.work", format!("ghp_{}", "a1".repeat(18)))
+        .method("core.call", |_| Ok(json!({"status": 503, "body": {"error": {"code": "no_app"}}})))
         .start()
         .unwrap();
-    for _ in 0..2 {
-        let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
-        assert_eq!(got, json!({"env": {"GH_TOKEN": token}}));
-    }
-    let asked: Vec<String> = node.asked().into_iter().map(|(method, _)| method).collect();
-    assert_eq!(asked, ["secret.list", "secret.get"], "listed and opened once");
+    let state = node.state_dir_path().to_path_buf();
+    settled(&state);
+
+    let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
+    let env = &got["env"];
+    assert!(env.get("GH_TOKEN").is_none(), "{got}");
+    assert!(env.get("GIT_AUTHOR_NAME").is_none(), "{got}");
+    let shims = state.join("app/bin");
+    assert!(env["PATH"].as_str().unwrap().starts_with(&format!("{}:", shims.display())), "{got}");
+    assert_eq!(env["GIT_CONFIG_VALUE_0"], "", "the keychain's helper is reset");
+
+    let out =
+        std::process::Command::new(shims.join("gh")).args(["pr", "list"]).current_dir(dir.path()).output().unwrap();
+    assert!(!out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "", "GitHub's CLI never ran");
+    assert_eq!(String::from_utf8(out.stderr).unwrap(), "github: Pointman App isn't set up on this board yet\n");
+    let asked: Vec<String> =
+        node.asked().into_iter().map(|(method, _)| method).filter(|m| m.starts_with("secret.")).collect();
+    assert!(asked.is_empty(), "the vault isn't opened: {asked:?}");
+}
+
+/// A `gh` that says which token it was given and what for, and fails when it's asked to.
+fn telling_gh(dir: &std::path::Path) -> PathBuf {
+    let gh = dir.join("gh");
+    std::fs::write(&gh, "#!/bin/sh\necho \"$GH_TOKEN $*\"\ncase \"$*\" in *fail*) exit 4;; esac\n").unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    gh
+}
+
+/// The board as it answers once it has Pointman App (MB-707), installed on two accounts.
+fn board(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let in_an_hour = "2099-01-01T00:00:00Z";
+    Ok(match (params["method"].as_str(), params["path"].as_str()) {
+        (Some("GET"), Some("/v1/node/github/app")) => json!({"status": 200, "body": {
+            "slug": "pointman-app",
+            "bot": {"name": "pointman-app[bot]", "email": "9+pointman-app[bot]@users.noreply.github.com"},
+            "installations": [{"owner": "pointman-ai", "id": 1}, {"owner": "Alai-Studios", "id": 2}]}}),
+        (Some("POST"), Some("/v1/node/github/token")) => {
+            let owner = params["body"]["owner"].as_str().unwrap_or_default().to_string();
+            json!({"status": 200, "body": {"owner": owner, "token": format!("ghs_{owner}"), "expires_at": in_an_hour}})
+        }
+        _ => json!({"status": 404, "body": {"error": {"code": "not_found"}}}),
+    })
+}
+
+/// Once the board has Pointman App, runs act as it: `gh` first on their PATH gets the token for the repo's owner,
+/// git gets it as GitHub's password, and commits are the bot's.
+#[test]
+fn runs_act_as_pointman_app_once_the_board_has_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = telling_gh(dir.path());
+    let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
+        .binary(env!("CARGO_BIN_EXE_github"))
+        .settings(json!({"cli": gh.to_string_lossy()}))
+        .secret("github.work", format!("ghp_{}", "a1".repeat(18)))
+        .method("core.call", board)
+        .start()
+        .unwrap();
+    let state = node.state_dir_path().to_path_buf();
+    settled(&state);
+
+    let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
+    let env = &got["env"];
+    assert!(env.get("GH_TOKEN").is_none(), "{got}");
+    let shims = state.join("app/bin");
+    assert!(env["PATH"].as_str().unwrap().starts_with(&format!("{}:", shims.display())), "{got}");
+    assert_eq!(env["GIT_AUTHOR_NAME"], "pointman-app[bot]");
+    assert_eq!(env["GIT_COMMITTER_EMAIL"], "9+pointman-app[bot]@users.noreply.github.com");
+    assert_eq!(env["GIT_CONFIG_COUNT"], "5");
+
+    // the runs' gh: the token for the account the command names, else the first installation's
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(shims.join("gh")).args(args).current_dir(dir.path()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    assert_eq!(run(&["pr", "view", "-R", "alai-studios/spark"]), "ghs_Alai-Studios pr view -R alai-studios/spark\n");
+    assert_eq!(run(&["api", "user"]), "ghs_pointman-ai api user\n");
+    let body =
+        ["pr", "create", "-R", "alai-studios/spark", "--body", "Fixes https://github.com/pointman-ai/x/issues/3"];
+    assert!(run(&body).starts_with("ghs_Alai-Studios "), "a link in the body isn't the repo");
+
+    // an account the App isn't on: gh reads with the first installation's token, and says why when it fails
+    let out = std::process::Command::new(shims.join("gh"))
+        .args(["pr", "create", "-R", "rust-lang/rust", "--title", "fail"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "gh's own exit code");
+    assert!(String::from_utf8(out.stdout).unwrap().starts_with("ghs_pointman-ai "));
+    let why = String::from_utf8(out.stderr).unwrap();
+    assert!(why.contains("Pointman App isn't installed on rust-lang"), "{why}");
+
+    // git's helper, as git calls it
+    let mut git = std::process::Command::new(env!("CARGO_BIN_EXE_github"))
+        .args(["git-credential", &state.to_string_lossy(), "get"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    git.stdin.take().unwrap().write_all(b"protocol=https\nhost=github.com\npath=Alai-Studios/spark.git\n\n").unwrap();
+    let out = git.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "username=x-access-token\npassword=ghs_Alai-Studios\n");
 }
