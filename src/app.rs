@@ -326,26 +326,6 @@ pub fn owner_of_folder(dir: &Path) -> Option<String> {
 
 // ------------------------------------------------------------------------------------------- what a run is given
 
-/// The run's PATH the node gives every agent (the node's wakes::session_path), with `first` before it.
-pub fn run_path(first: &Path, home: &Path, user: Option<&str>) -> String {
-    let mut dirs = vec![first.display().to_string(), home.join(".local/bin").display().to_string()];
-    if cfg!(target_os = "linux") {
-        let mut nix = vec!["/run/wrappers/bin".to_string(), home.join(".nix-profile/bin").display().to_string()];
-        nix.extend(nix_user(home, user).map(|u| format!("/etc/profiles/per-user/{u}/bin")));
-        nix.push("/run/current-system/sw/bin".into());
-        dirs.extend(nix.into_iter().filter(|d| Path::new(d).is_dir()));
-    }
-    dirs.push("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into());
-    dirs.join(":")
-}
-
-/// The user whose NixOS profile a run's PATH has: USER, else the home folder's name, as the node finds it.
-fn nix_user(home: &Path, user: Option<&str>) -> Option<String> {
-    user.filter(|u| !u.is_empty() && !u.contains('/'))
-        .map(str::to_string)
-        .or_else(|| home.file_name().map(|n| n.to_string_lossy().into_owned()))
-}
-
 /// `s` quoted for sh, whatever it holds.
 pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -400,9 +380,9 @@ pub fn write_shim(exe: &Path, state: &Path, gh: Option<&Path>) -> anyhow::Result
     Ok(path)
 }
 
-/// What a run's environment gets: `gh` first on its PATH, git asking this extension for GitHub's password (never a
+/// What a run's environment gets: git asking this extension for GitHub's password (never a
 /// person's keychain, and never a prompt), pushes over https, and, once the board has the App, commits as its bot.
-pub fn run_env(app: Option<&App>, exe: &Path, state: &Path, path: String) -> BTreeMap<String, String> {
+pub fn run_env(app: Option<&App>, exe: &Path, state: &Path) -> BTreeMap<String, String> {
     let helper =
         format!("!{} git-credential {}", sh_quote(&exe.display().to_string()), sh_quote(&state.display().to_string()));
     let config = [
@@ -414,8 +394,7 @@ pub fn run_env(app: Option<&App>, exe: &Path, state: &Path, path: String) -> BTr
         ("url.https://github.com/.pushInsteadOf", "ssh://git@github.com/".into()),
     ];
     let mut env = BTreeMap::from([
-        ("PATH".to_string(), path),
-        ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".into()),
         ("GIT_CONFIG_COUNT".into(), config.len().to_string()),
     ]);
     for (i, (k, v)) in config.into_iter().enumerate() {
@@ -679,8 +658,8 @@ mod tests {
 
     #[test]
     fn a_run_gets_gh_first_git_through_the_helper_and_the_bots_name() {
-        let env = run_env(Some(&app()), Path::new("/e/bin/github"), Path::new("/s"), "/s/app/bin:/usr/bin".into());
-        assert_eq!(env["PATH"], "/s/app/bin:/usr/bin");
+        let env = run_env(Some(&app()), Path::new("/e/bin/github"), Path::new("/s"));
+        assert!(!env.contains_key("PATH"), "the manifest names the shim folder");
         assert_eq!(env["GIT_AUTHOR_NAME"], "pointman-app[bot]");
         assert_eq!(env["GIT_COMMITTER_EMAIL"], "1+pointman-app[bot]@users.noreply.github.com");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
@@ -693,8 +672,8 @@ mod tests {
 
     #[test]
     fn without_the_app_a_run_still_gets_the_shim_and_the_helper_but_no_bot() {
-        let with = run_env(Some(&app()), Path::new("/e/bin/github"), Path::new("/s"), "/s/app/bin:/usr/bin".into());
-        let without = run_env(None, Path::new("/e/bin/github"), Path::new("/s"), "/s/app/bin:/usr/bin".into());
+        let with = run_env(Some(&app()), Path::new("/e/bin/github"), Path::new("/s"));
+        let without = run_env(None, Path::new("/e/bin/github"), Path::new("/s"));
         let bot = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"];
         assert!(bot.iter().all(|k| !without.contains_key(*k)));
         assert_eq!(with.into_iter().filter(|(k, _)| !bot.contains(&k.as_str())).collect::<BTreeMap<_, _>>(), without);
@@ -709,21 +688,5 @@ mod tests {
         none["installations"] = json!([]);
         assert_eq!(App::from_answer(&none).unwrap().owners, Vec::<String>::new());
         assert_eq!(App::from_answer(&json!({"error": {"code": "no_app"}})), None);
-    }
-
-    #[test]
-    fn the_runs_path_starts_with_the_shim_then_the_nodes() {
-        let p = run_path(Path::new("/s/app/bin"), Path::new("/Users/j"), Some("j"));
-        assert!(p.starts_with("/s/app/bin:/Users/j/.local/bin:"));
-        assert!(p.ends_with("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
-    }
-
-    #[test]
-    fn the_nix_profile_is_users_else_the_home_folders_as_the_node_finds_it() {
-        let home = Path::new("/home/james");
-        assert_eq!(nix_user(home, Some("j")).as_deref(), Some("j"));
-        assert_eq!(nix_user(home, None).as_deref(), Some("james"));
-        assert_eq!(nix_user(home, Some("")).as_deref(), Some("james"));
-        assert_eq!(nix_user(home, Some("a/b")).as_deref(), Some("james"));
     }
 }

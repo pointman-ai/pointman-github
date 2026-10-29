@@ -132,15 +132,12 @@ fn keep_tokens(h: &Handle, app: Option<&App>) {
     }
 }
 
-/// What a run's environment gets: see app::run_env. The runs' `gh` is written first, so a run never finds another.
+/// What a run's environment gets: see app::run_env. The runs' `gh` is written first; the node puts its folder (`[sessions] path`) first on PATH.
 fn app_env(h: &Handle, app: Option<&App>) -> anyhow::Result<BTreeMap<String, String>> {
     write_shim(h)?;
     let state = state(h);
     let exe = std::env::current_exe().context("where this extension's binary is")?;
-    let home = PathBuf::from(std::env::var_os("HOME").context("HOME")?);
-    let user = std::env::var("USER").ok();
-    let path = app::run_path(&app::shim_dir(&state), &home, user.as_deref());
-    Ok(app::run_env(app, &exe, &state, path))
+    Ok(app::run_env(app, &exe, &state))
 }
 
 /// `bin/github token|why <state> -- <gh's arguments>` and `bin/github git-credential <state> <op>`, from a run's
