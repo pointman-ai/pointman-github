@@ -17,38 +17,26 @@ runtime = "binary"
 
 [permissions]
 network = true
-drives_apps = ["gh"]             # GitHub's CLI: GitHub is asked as the vault's account, else this machine's login
-secrets = ["github.*"]           # each account's token, kept in the vault as github.<label>
+drives_apps = ["gh"]             # GitHub's CLI: GitHub is asked as Pointman App, with the board's tokens
 
-# what agents write on GitHub goes out under that account: they're told to write it as their person (James,
-# Pointman thread 8446 [18054]: no "waits for James's review" in his name)
+# what agents write on GitHub goes out as Pointman App's bot: they're told to write about the change, never about
+# their person or how they work (James, Pointman thread 8446 [18054]: no "waits for James's review")
 [behavior]
 skill = "SKILL.md"
 
-# agents' runs act on GitHub as Pointman App once the board has it (MB-707): `gh` first on their PATH asks this
-# extension for the token for the repo's owner, git asks it for GitHub's password (GIT_CONFIG_*), pushes to ssh
-# remotes go over https, and commits are the App's bot's. Before, they get the vault's token as GH_TOKEN.
+# agents' runs act on GitHub as Pointman App, and only as it (MB-707): `gh` first on their PATH asks this extension
+# for the token for the repo's owner, git asks it for GitHub's password (GIT_CONFIG_*, never a prompt), pushes to ssh
+# remotes go over https, and commits are the App's bot's. Until the board has the App, `gh` and pushes say so.
 [sessions]
 clients = ["claude", "codex"]
 env = [
-  "GH_TOKEN", "PATH",
+  "PATH", "GIT_TERMINAL_PROMPT",
   "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
   "GIT_CONFIG_COUNT",
   "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
   "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1", "GIT_CONFIG_KEY_2", "GIT_CONFIG_VALUE_2",
   "GIT_CONFIG_KEY_3", "GIT_CONFIG_VALUE_3", "GIT_CONFIG_KEY_4", "GIT_CONFIG_VALUE_4",
 ]
-
-# an account for every node: Sign in from the apps (GitHub's device flow), or paste a token
-[[credentials]]
-id = "account"
-title = "GitHub account"
-help = "Sign in, or paste a token: `gh auth token` on a machine signed in as the account, or a fine-grained token from github.com/settings/tokens."
-item = "github.{label}"
-value = "(gh[pousr]_[A-Za-z0-9]{36,251}|github_pat_[A-Za-z0-9_]{22,255})"
-placeholder = "github_pat_…"
-needed = 0                       # a machine signed in with gh already works without one
-sign_in = true
 
 [settings]
 type = "object"
@@ -57,11 +45,3 @@ type = "object"
 type = "string"
 default = ""
 description = "GitHub's CLI, when it isn't on the node's PATH or in /opt/homebrew/bin or /usr/local/bin; with none, the extension installs its own"
-
-[[commands]]
-kind = "github.add"
-title = "Add a GitHub account"
-params = { type = "object", properties = { name = { type = "string", description = "What to call it (work): lowercase letters, digits, . _ -" } } }
-slash = "add"
-form = "account"
-summary = "Add a GitHub account for every node: sign in, or paste a token"

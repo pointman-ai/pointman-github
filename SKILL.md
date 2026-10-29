@@ -1,11 +1,11 @@
 ---
 name: github
-description: Writing on GitHub (pull requests, issues, comments, reviews, commits) from a run on a machine with the GitHub extension. It goes out as Pointman App, GitHub's bot for Pointman, or before the board has the App, as your person's account.
+description: Writing on GitHub (pull requests, issues, comments, reviews, commits) from a run on a machine with the GitHub extension. It goes out as Pointman App, GitHub's bot for Pointman.
 ---
 
 # Writing on GitHub as Pointman App
 
-In your runs, `gh` and git act on GitHub as **Pointman App** once your board has it installed: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email. Until the board has the App, they go out under your person's GitHub account instead: write the same way.
+In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
 
 The people who read it know the repo, not you or Pointman's board, so write for them:
 
@@ -21,4 +21,4 @@ The people who read it know the repo, not you or Pointman's board, so write for 
 | "James asked me to fix the flaky notifications tests." | "Fixes the flaky notifications tests." |
 | "Approved by James in Pointman thread 4159." | (nothing: say it to your person on the board) |
 
-**When GitHub says no.** "Pointman App isn't installed" on an account, or a 403 or 404 on a repo you know is there, means the App can't reach it yet. Tell your person on the board which account or repo it was. Never get around it with another token, `gh auth login`, the machine's own `gh` by its full path, or git settings of your own.
+**When GitHub says no.** "Pointman App isn't set up on this board yet", "isn't installed" on an account, or a 403 or 404 on a repo you know is there, means the App can't reach it yet. Tell your person on the board which account or repo it was. Never get around it with another token, `gh auth login`, the machine's own `gh` by its full path, or git settings of your own.
