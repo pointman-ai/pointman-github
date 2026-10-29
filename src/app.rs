@@ -156,7 +156,8 @@ impl Kept {
         self.owners.iter().any(|o| o.eq_ignore_ascii_case(owner))
     }
 
-    /// The token for `owner` (any case), or the first installation's when there's no owner, if it has a minute left.
+    /// The token for `owner` (any case), or with no owner the first installation's that has one with a minute left
+    /// (an installation the board lists but has no token for, such as an old row, is passed over).
     pub fn token_for(&self, owner: Option<&str>, at: i64) -> Result<&Token, String> {
         if self.app.is_none() {
             return Err("Pointman App isn't set up on this board yet".into());
@@ -165,7 +166,12 @@ impl Kept {
             Some(o) if !self.installed_on(o) => return Err(format!("Pointman App isn't installed on {o}")),
             Some(o) => o.to_lowercase(),
             None => match self.owners.first() {
-                Some(o) => o.to_lowercase(),
+                Some(first) => self
+                    .owners
+                    .iter()
+                    .map(|o| o.to_lowercase())
+                    .find(|k| self.tokens.get(k).is_some_and(|t| t.expires - at >= USABLE_SECS))
+                    .unwrap_or_else(|| first.to_lowercase()),
                 None => return Err("Pointman App isn't installed on any GitHub account yet".into()),
             },
         };
@@ -566,6 +572,10 @@ mod tests {
         assert!(k.token_for(Some("alai-studios"), 1000).unwrap_err().contains("run out"));
         assert!(k.token_for(Some("spacesheep-dev"), 1000).unwrap_err().contains("no Pointman App token"));
         assert_eq!(k.due(1000), vec!["Alai-Studios", "spacesheep-dev"]);
+        // an installation with no token (an old row listed first) is passed over, not chosen
+        let mut k2 = kept(1000);
+        k2.owners = ["jamescalam-old", "pointman-ai"].map(String::from).into();
+        assert_eq!(k2.token_for(None, 1000).unwrap().token, "ghs_pointman-ai");
         let none = Kept { app: Some("pointman-app".into()), ..Kept::default() };
         assert_eq!(none.token_for(None, 1000).unwrap_err(), "Pointman App isn't installed on any GitHub account yet");
     }
