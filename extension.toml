@@ -5,10 +5,10 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.10.0"
+version = "0.10.1"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App."
-node = ">=0.4.0"
+node = ">=0.4.4"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
@@ -29,8 +29,9 @@ skill = "SKILL.md"
 # remotes go over https, and commits are the App's bot's. Until the board has the App, `gh` and pushes say so.
 [sessions]
 clients = ["claude", "codex"]
+path = ["app/bin"]                # the runs' `gh` shim, put first on PATH by the node
 env = [
-  "PATH", "GIT_TERMINAL_PROMPT",
+  "GIT_TERMINAL_PROMPT",
   "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
   "GIT_CONFIG_COUNT",
   "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",

@@ -71,7 +71,7 @@ fn runs_get_no_token_before_the_board_has_the_app() {
     assert!(env.get("GH_TOKEN").is_none(), "{got}");
     assert!(env.get("GIT_AUTHOR_NAME").is_none(), "{got}");
     let shims = state.join("app/bin");
-    assert!(env["PATH"].as_str().unwrap().starts_with(&format!("{}:", shims.display())), "{got}");
+    assert!(env.get("PATH").is_none(), "the manifest names the folder, not PATH: {got}");
     assert_eq!(env["GIT_CONFIG_VALUE_0"], "", "the keychain's helper is reset");
 
     let out =
@@ -128,7 +128,7 @@ fn runs_act_as_pointman_app_once_the_board_has_it() {
     let env = &got["env"];
     assert!(env.get("GH_TOKEN").is_none(), "{got}");
     let shims = state.join("app/bin");
-    assert!(env["PATH"].as_str().unwrap().starts_with(&format!("{}:", shims.display())), "{got}");
+    assert!(env.get("PATH").is_none(), "the manifest names the folder, not PATH: {got}");
     assert_eq!(env["GIT_AUTHOR_NAME"], "pointman-app[bot]");
     assert_eq!(env["GIT_COMMITTER_EMAIL"], "9+pointman-app[bot]@users.noreply.github.com");
     assert_eq!(env["GIT_CONFIG_COUNT"], "5");
