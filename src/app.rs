@@ -461,8 +461,9 @@ fn run_person() -> String {
 /// The first `git` on PATH that isn't the runs' own.
 fn real_git(state: &Path) -> Option<PathBuf> {
     let mine = shim_dir(state);
+    let mine = mine.canonicalize().unwrap_or(mine);
     std::env::split_paths(&std::env::var_os("PATH")?)
-        .filter(|d| d != &mine)
+        .filter(|d| d.canonicalize().unwrap_or_else(|_| d.clone()) != mine)
         .map(|d| d.join("git"))
         .find(|p| p.is_file())
 }
