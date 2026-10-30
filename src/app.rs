@@ -448,6 +448,16 @@ fn split_identity(who: &str) -> Option<(&str, &str)> {
     (!name.trim().is_empty() && !email.is_empty()).then(|| (name.trim(), email))
 }
 
+/// The person whose post started this run: the handle in the file `MB_RUN_PERSON_FILE` names (a resident session's
+/// person changes from one post to the next, and the node rewrites the file before each), else `MB_RUN_PERSON`. A file
+/// that can't be read means no person, so the commit stays the App's.
+fn run_person() -> String {
+    match std::env::var_os("MB_RUN_PERSON_FILE").filter(|f| !f.is_empty()) {
+        Some(f) => std::fs::read_to_string(f).map(|t| t.trim().to_string()).unwrap_or_default(),
+        None => std::env::var("MB_RUN_PERSON").unwrap_or_default(),
+    }
+}
+
 /// The first `git` on PATH that isn't the runs' own.
 fn real_git(state: &Path) -> Option<PathBuf> {
     let mine = shim_dir(state);
@@ -460,7 +470,7 @@ fn real_git(state: &Path) -> Option<PathBuf> {
 /// `bin/github git <state> -- <git's arguments>`: git, with the person who started this run credited on a commit.
 pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
     let git = real_git(state).context("git isn't on this machine's PATH")?;
-    let person = std::env::var("MB_RUN_PERSON").unwrap_or_default();
+    let person = run_person();
     let bot = match (std::env::var("GIT_COMMITTER_NAME"), std::env::var("GIT_COMMITTER_EMAIL")) {
         (Ok(n), Ok(e)) if !n.is_empty() && !e.is_empty() => format!("{n} <{e}>"),
         _ => String::new(),
