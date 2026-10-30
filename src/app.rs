@@ -368,13 +368,10 @@ pub fn shim(exe: &Path, state: &Path, gh: Option<&Path>) -> String {
     )
 }
 
-pub fn write_shim(exe: &Path, state: &Path, gh: Option<&Path>) -> anyhow::Result<PathBuf> {
-    let dir = shim_dir(state);
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("gh");
-    let text = shim(exe, state, gh);
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-        let mut f = tempfile::NamedTempFile::new_in(&dir)?;
+fn write_script(dir: &Path, name: &str, text: &str) -> anyhow::Result<PathBuf> {
+    let path = dir.join(name);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+        let mut f = tempfile::NamedTempFile::new_in(dir)?;
         f.write_all(text.as_bytes())?;
         #[cfg(unix)]
         {
@@ -384,6 +381,111 @@ pub fn write_shim(exe: &Path, state: &Path, gh: Option<&Path>) -> anyhow::Result
         f.persist(&path)?;
     }
     Ok(path)
+}
+
+/// Writes the runs' `gh` and `git` (see `shim` and `git_shim`), and the people who are credited on their commits.
+pub fn write_shim(
+    exe: &Path,
+    state: &Path,
+    gh: Option<&Path>,
+    coauthors: &serde_json::Value,
+) -> anyhow::Result<PathBuf> {
+    let dir = shim_dir(state);
+    std::fs::create_dir_all(&dir)?;
+    write_script(&dir, "git", &git_shim(exe, state))?;
+    write_script(&dir, "coauthors.json", &coauthors.to_string())?;
+    write_script(&dir, "gh", &shim(exe, state, gh))
+}
+
+/// The `git` a run finds first: it is git, but a commit in a run a person's post started is theirs, with Pointman App as co-author (MB-726).
+pub fn git_shim(exe: &Path, state: &Path) -> String {
+    format!(
+        "#!/bin/sh\n# git for agents' runs: a commit in a run a person started is theirs, with Pointman App as co-author (MB-726)\nexec {} git {} -- \"$@\"\n",
+        sh_quote(&exe.display().to_string()),
+        sh_quote(&state.display().to_string())
+    )
+}
+
+/// `Name <email>` for a person's handle, as the extension's `coauthors` setting names them.
+fn coauthor(state: &Path, person: &str) -> Option<String> {
+    let text = std::fs::read_to_string(shim_dir(state).join("coauthors.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let who = v.get(person)?.as_str()?.trim();
+    (!person.is_empty() && !who.is_empty() && !who.contains('\n')).then(|| who.to_string())
+}
+
+/// Where `commit` is in git's arguments, past the options that come before a subcommand.
+fn commit_at(args: &[String]) -> Option<usize> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" => i += 2,
+            a if a.starts_with('-') => i += 1,
+            "commit" => return Some(i),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// git's arguments with Pointman App credited as co-author, when this is a `commit` in a run a person's post
+/// started and they have an entry (they become the author, see `git_command`); else the arguments as they are.
+pub fn git_args(state: &Path, person: &str, bot: &str, args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    if let (Some(at), Some(_), false) = (commit_at(args), coauthor(state, person), bot.is_empty()) {
+        let trailer = format!("Co-authored-by: {bot}");
+        if !args[at..].iter().any(|a| a == &format!("--trailer={trailer}")) {
+            out.splice(at + 1..at + 1, ["--trailer".to_string(), trailer]);
+        }
+    }
+    out
+}
+
+/// `Name <email>` split into its two parts.
+fn split_identity(who: &str) -> Option<(&str, &str)> {
+    let (name, rest) = who.split_once('<')?;
+    let email = rest.strip_suffix('>')?.trim();
+    (!name.trim().is_empty() && !email.is_empty()).then(|| (name.trim(), email))
+}
+
+/// The person whose post started this run: the handle in the file `MB_RUN_PERSON_FILE` names (a resident session's
+/// person changes from one post to the next, and the node rewrites the file before each), else `MB_RUN_PERSON`. A file
+/// that can't be read means no person, so the commit stays the App's.
+fn run_person() -> String {
+    match std::env::var_os("MB_RUN_PERSON_FILE").filter(|f| !f.is_empty()) {
+        Some(f) => std::fs::read_to_string(f).map(|t| t.trim().to_string()).unwrap_or_default(),
+        None => std::env::var("MB_RUN_PERSON").unwrap_or_default(),
+    }
+}
+
+/// The first `git` on PATH that isn't the runs' own.
+fn real_git(state: &Path) -> Option<PathBuf> {
+    let mine = shim_dir(state);
+    let mine = mine.canonicalize().unwrap_or(mine);
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|d| d.canonicalize().unwrap_or_else(|_| d.clone()) != mine)
+        .map(|d| d.join("git"))
+        .find(|p| p.is_file())
+}
+
+/// `bin/github git <state> -- <git's arguments>`: git, with the person who started this run credited on a commit.
+pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
+    let git = real_git(state).context("git isn't on this machine's PATH")?;
+    let person = run_person();
+    let bot = match (std::env::var("GIT_COMMITTER_NAME"), std::env::var("GIT_COMMITTER_EMAIL")) {
+        (Ok(n), Ok(e)) if !n.is_empty() && !e.is_empty() => format!("{n} <{e}>"),
+        _ => String::new(),
+    };
+    let args = git_args(state, &person, &bot, args);
+    let mut cmd = std::process::Command::new(git);
+    if let (Some(at), Some(who)) = (commit_at(&args), coauthor(state, &person)) {
+        // the person is the author; Pointman App stays the committer and is the co-author
+        if let (true, Some((name, email))) = (at < args.len() && !bot.is_empty(), split_identity(&who)) {
+            cmd.env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email);
+        }
+    }
+    let status = cmd.args(args).status()?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// What a run's environment gets: git asking this extension for GitHub's password (never a
@@ -459,6 +561,35 @@ pub fn git_credential(state: &Path, op: &str, input: &str) -> anyhow::Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state_with(coauthors: serde_json::Value) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(shim_dir(dir.path())).unwrap();
+        std::fs::write(shim_dir(dir.path()).join("coauthors.json"), coauthors.to_string()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_commit_in_a_persons_run_credits_them_beside_the_app() {
+        let who = "James <1+jamescalam@users.noreply.github.com>";
+        let dir = state_with(json!({"james": who}));
+        let bot = "pointman-app[bot] <1+pointman-app[bot]@users.noreply.github.com>";
+        let got = git_args(dir.path(), "james", bot, &args("-C /r commit -m hi"));
+        assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", &format!("Co-authored-by: {bot}"), "-m", "hi"]));
+        assert_eq!(split_identity(who), Some(("James", "1+jamescalam@users.noreply.github.com")));
+    }
+
+    #[test]
+    fn other_runs_and_commands_are_left_alone() {
+        let dir = state_with(json!({"james": "James <1+j@users.noreply.github.com>"}));
+        for (person, a) in
+            [("", "commit -m x"), ("scene", "commit -m x"), ("james", "push origin main"), ("james", "log commit")]
+        {
+            assert_eq!(git_args(dir.path(), person, "bot <b@x>", &args(a)), args(a), "{person} {a}");
+        }
+        let none = tempfile::tempdir().unwrap();
+        assert_eq!(git_args(none.path(), "james", "bot <b@x>", &args("commit -m x")), args("commit -m x"));
+    }
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()
