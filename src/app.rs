@@ -397,10 +397,10 @@ pub fn write_shim(
     write_script(&dir, "gh", &shim(exe, state, gh))
 }
 
-/// The `git` a run finds first: it is git, plus a `Co-authored-by` for the person whose post started the run (MB-726).
+/// The `git` a run finds first: it is git, but a commit in a run a person's post started is theirs, with Pointman App as co-author (MB-726).
 pub fn git_shim(exe: &Path, state: &Path) -> String {
     format!(
-        "#!/bin/sh\n# git for agents' runs: the person whose post started the run is credited on its commits (MB-726)\nexec {} git {} -- \"$@\"\n",
+        "#!/bin/sh\n# git for agents' runs: a commit in a run a person started is theirs, with Pointman App as co-author (MB-726)\nexec {} git {} -- \"$@\"\n",
         sh_quote(&exe.display().to_string()),
         sh_quote(&state.display().to_string())
     )
@@ -428,17 +428,24 @@ fn commit_at(args: &[String]) -> Option<usize> {
     None
 }
 
-/// git's arguments with the person credited, when this is a `commit` in a run a person's post started and they have
-/// an entry; else the arguments as they are.
-pub fn git_args(state: &Path, person: &str, args: &[String]) -> Vec<String> {
+/// git's arguments with Pointman App credited as co-author, when this is a `commit` in a run a person's post
+/// started and they have an entry (they become the author, see `git_command`); else the arguments as they are.
+pub fn git_args(state: &Path, person: &str, bot: &str, args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
-    if let (Some(at), Some(who)) = (commit_at(args), coauthor(state, person)) {
-        let trailer = format!("Co-authored-by: {who}");
+    if let (Some(at), Some(_), false) = (commit_at(args), coauthor(state, person), bot.is_empty()) {
+        let trailer = format!("Co-authored-by: {bot}");
         if !args[at..].iter().any(|a| a == &format!("--trailer={trailer}")) {
             out.splice(at + 1..at + 1, ["--trailer".to_string(), trailer]);
         }
     }
     out
+}
+
+/// `Name <email>` split into its two parts.
+fn split_identity(who: &str) -> Option<(&str, &str)> {
+    let (name, rest) = who.split_once('<')?;
+    let email = rest.strip_suffix('>')?.trim();
+    (!name.trim().is_empty() && !email.is_empty()).then(|| (name.trim(), email))
 }
 
 /// The first `git` on PATH that isn't the runs' own.
@@ -454,7 +461,19 @@ fn real_git(state: &Path) -> Option<PathBuf> {
 pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
     let git = real_git(state).context("git isn't on this machine's PATH")?;
     let person = std::env::var("MB_RUN_PERSON").unwrap_or_default();
-    let status = std::process::Command::new(git).args(git_args(state, &person, args)).status()?;
+    let bot = match (std::env::var("GIT_COMMITTER_NAME"), std::env::var("GIT_COMMITTER_EMAIL")) {
+        (Ok(n), Ok(e)) if !n.is_empty() && !e.is_empty() => format!("{n} <{e}>"),
+        _ => String::new(),
+    };
+    let args = git_args(state, &person, &bot, args);
+    let mut cmd = std::process::Command::new(git);
+    if let (Some(at), Some(who)) = (commit_at(&args), coauthor(state, &person)) {
+        // the person is the author; Pointman App stays the committer and is the co-author
+        if let (true, Some((name, email))) = (at < args.len() && !bot.is_empty(), split_identity(&who)) {
+            cmd.env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email);
+        }
+    }
+    let status = cmd.args(args).status()?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -543,8 +562,10 @@ mod tests {
     fn a_commit_in_a_persons_run_credits_them_beside_the_app() {
         let who = "James <1+jamescalam@users.noreply.github.com>";
         let dir = state_with(json!({"james": who}));
-        let got = git_args(dir.path(), "james", &args("-C /r commit -m hi"));
-        assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", &format!("Co-authored-by: {who}"), "-m", "hi"]));
+        let bot = "pointman-app[bot] <1+pointman-app[bot]@users.noreply.github.com>";
+        let got = git_args(dir.path(), "james", bot, &args("-C /r commit -m hi"));
+        assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", &format!("Co-authored-by: {bot}"), "-m", "hi"]));
+        assert_eq!(split_identity(who), Some(("James", "1+jamescalam@users.noreply.github.com")));
     }
 
     #[test]
@@ -553,10 +574,10 @@ mod tests {
         for (person, a) in
             [("", "commit -m x"), ("scene", "commit -m x"), ("james", "push origin main"), ("james", "log commit")]
         {
-            assert_eq!(git_args(dir.path(), person, &args(a)), args(a), "{person} {a}");
+            assert_eq!(git_args(dir.path(), person, "bot <b@x>", &args(a)), args(a), "{person} {a}");
         }
         let none = tempfile::tempdir().unwrap();
-        assert_eq!(git_args(none.path(), "james", &args("commit -m x")), args("commit -m x"));
+        assert_eq!(git_args(none.path(), "james", "bot <b@x>", &args("commit -m x")), args("commit -m x"));
     }
 
     fn args(s: &str) -> Vec<String> {
