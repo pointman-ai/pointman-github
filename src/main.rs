@@ -151,14 +151,14 @@ fn helper(argv: &[String]) -> Option<i32> {
     let ran = match (word, state) {
         ("gh", Some(state)) => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            app::gh_command(state, args, &cwd)
+            app::gh_command(state, args, &cwd, app::Login::from_env())
         }
-        ("git", Some(state)) => app::git_command(state, args),
+        ("git", Some(state)) => app::git_command(state, args, app::Login::from_env()),
         ("git-credential", Some(state)) => {
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
-            let machine = std::env::var_os(app::MACHINE_LOGIN).is_some();
-            app::git_credential(state, argv.get(3).map(String::as_str).unwrap_or("get"), &input, machine).map(|text| {
+            let op = argv.get(3).map(String::as_str).unwrap_or("get");
+            app::git_credential(state, op, &input, app::Login::from_env()).map(|text| {
                 print!("{text}");
                 0
             })

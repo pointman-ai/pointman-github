@@ -166,21 +166,58 @@ fn runs_act_as_pointman_app_once_the_board_has_it() {
     let why = String::from_utf8(out.stderr).unwrap();
     assert_eq!(why, "github: Pointman App isn't installed on rust-lang, so gh uses this machine's own login\n");
 
-    // GitHub refuses the App's token: once more as this machine's own login, unless it read stdin
-    let out = gh_in(&["pr", "create", "-R", "pointman-ai/x", "--title", "refuse"]);
+    // GitHub refuses the App's token for a read: once more as this machine's own login, naming what was refused
+    let out = gh_in(&["pr", "view", "1", "-R", "pointman-ai/x", "refuse"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let ran = "pr create -R pointman-ai/x --title refuse";
+    let ran = "pr view 1 -R pointman-ai/x refuse";
     assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("ghs_pointman-ai {ran}\n {ran}\n"));
     let why = String::from_utf8(out.stderr).unwrap();
     assert!(why.starts_with("HTTP 403: Resource not accessible by integration\n"), "gh's own words first: {why}");
-    assert!(why.ends_with("so gh runs it again as this machine's own login\n"), "{why}");
-    let out = gh_in(&["pr", "create", "-R", "pointman-ai/x", "--title", "refuse", "--body-file", "-"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 1, "run once");
-    assert!(String::from_utf8(out.stderr).unwrap().contains("reads stdin, so it isn't run again"));
-    let out = gh_in(&["pr", "view", "-R", "pointman-ai/x", "--title", "fail"]);
+    assert!(
+        why.ends_with(
+            "github: GitHub refused Pointman App on pointman-ai (\"HTTP 403: Resource not accessible by integration\"), \
+             so gh reads it again as this machine's own login\n"
+        ),
+        "{why}"
+    );
+
+    // a refused write runs once (gh may have written part of it), and says how to run the rest as the machine's login
+    for write in [
+        &["pr", "create", "-R", "pointman-ai/x", "--title", "refuse"][..],
+        &["pr", "view", "-R", "pointman-ai/x", "refuse", "--body-file", "-"][..],
+    ] {
+        let out = gh_in(write);
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 1, "run once: {write:?}");
+        let why = String::from_utf8(out.stderr).unwrap();
+        assert!(why.contains("so it isn't run again"), "{why}");
+        assert!(why.contains("POINTMAN_GITHUB_MACHINE_LOGIN=1 in front"), "{why}");
+    }
+    let out = gh_in(&["pr", "view", "-R", "pointman-ai/x", "fail"]);
     assert_eq!(out.status.code(), Some(4));
     assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 1, "a failure that isn't a refusal runs once");
+
+    // POINTMAN_GITHUB_MACHINE_LOGIN: the machine's login straight away
+    let with = |var: &str, args: &[&str]| {
+        std::process::Command::new(shims.join("gh")).args(args).env(var, "1").current_dir(dir.path()).output().unwrap()
+    };
+    let out = with("POINTMAN_GITHUB_MACHINE_LOGIN", &["pr", "create", "-R", "pointman-ai/x", "--title", "refuse"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), " pr create -R pointman-ai/x --title refuse\n");
+
+    // POINTMAN_GITHUB_APP_ONLY (workflow steps): never the machine's login, and today's error
+    let out = with("POINTMAN_GITHUB_APP_ONLY", &["pr", "list", "-R", "rust-lang/rust"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "", "GitHub's CLI never ran");
+    assert_eq!(String::from_utf8(out.stderr).unwrap(), "github: Pointman App isn't installed on rust-lang\n");
+    let out = with("POINTMAN_GITHUB_APP_ONLY", &["pr", "view", "1", "-R", "pointman-ai/x", "refuse"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 1, "a refused read runs once");
+    let why = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        why.ends_with("refused Pointman App on pointman-ai (\"HTTP 403: Resource not accessible by integration\")\n"),
+        "{why}"
+    );
 
     // git's helper, as git calls it
     let mut git = std::process::Command::new(env!("CARGO_BIN_EXE_github"))
@@ -196,7 +233,7 @@ fn runs_act_as_pointman_app_once_the_board_has_it() {
 }
 
 /// A push GitHub refuses the App's token for runs once more, with git's helper told to answer as this machine's own
-/// login; a refused command that doesn't talk to GitHub, and a push that fails otherwise, run once.
+/// login; App-only, a refused command that doesn't talk to GitHub, and a push that fails otherwise, run once.
 #[test]
 fn a_push_github_refuses_the_app_for_runs_again_as_the_machines_login() {
     let dir = tempfile::tempdir().unwrap();
@@ -214,23 +251,33 @@ fn a_push_github_refuses_the_app_for_runs_again_as_the_machines_login() {
     let state = dir.path().join("state");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     let log = dir.path().join("log");
-    let run = |args: &[&str]| {
+    let run_with = |app_only: &str, args: &[&str]| {
         let _ = std::fs::remove_file(&log);
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_github"))
             .args(["git", &state.to_string_lossy(), "--"])
             .args(args)
             .env("PATH", &path)
             .env("LOG", &log)
+            .env("POINTMAN_GITHUB_APP_ONLY", app_only)
             .env_remove("POINTMAN_GITHUB_MACHINE_LOGIN")
             .output()
             .unwrap();
         (out.status.code(), std::fs::read_to_string(&log).unwrap_or_default(), String::from_utf8(out.stderr).unwrap())
     };
 
+    let run = |args: &[&str]| run_with("", args);
     let (code, ran, said) = run(&["push", "origin", "x"]);
     assert_eq!((code, ran.as_str()), (Some(0), "ran app\nran 1\n"), "{said}");
     assert!(said.contains("returned error: 403\n"), "git's own words are passed on: {said}");
-    assert!(said.ends_with("so git runs it again with this machine's own gh login\n"), "{said}");
+    assert!(
+        said.ends_with(
+            "github: GitHub refused Pointman App (\"remote: Permission to a/b.git denied to pointman-app[bot].\"), \
+             so git runs it again with this machine's own gh login\n"
+        ),
+        "{said}"
+    );
+    let (code, ran, _) = run_with("1", &["push", "origin", "x"]);
+    assert_eq!((code, ran.as_str()), (Some(128), "ran app\n"), "App-only: never the machine's login");
 
     let (code, ran, _) = run(&["push", "other", "x"]);
     assert_eq!((code, ran.as_str()), (Some(1), "ran app\n"));

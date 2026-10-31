@@ -495,9 +495,9 @@ fn real_git(state: &Path) -> Option<PathBuf> {
 }
 
 /// `bin/github git <state> -- <git's arguments>`: git signed in as the App, with the person who started this run
-/// credited on a commit. A push, fetch or clone GitHub refuses the App's token for runs once more, with git's helper
-/// answering with this machine's own `gh` login (`MACHINE_LOGIN`).
-pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
+/// credited on a commit. Unless `login` is App-only, a push, fetch or clone GitHub refuses the App's token for runs
+/// once more, with git's helper answering with this machine's own `gh` login (`MACHINE_LOGIN`).
+pub fn git_command(state: &Path, args: &[String], login: Login) -> anyhow::Result<i32> {
     let git = real_git(state).context("git isn't on this machine's PATH")?;
     let person = run_person();
     let bot = match (std::env::var("GIT_COMMITTER_NAME"), std::env::var("GIT_COMMITTER_EMAIL")) {
@@ -514,14 +514,14 @@ pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
         }
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0").args(signed_in(&exe, state, &args));
-    if !talks_to_github(&args) || std::env::var_os(MACHINE_LOGIN).is_some() {
+    if login != Login::AppThenMachine || !talks_to_github(&args) {
         return Ok(cmd.status()?.code().unwrap_or(1));
     }
     let (code, err) = keeping_stderr(&mut cmd)?;
-    if code == 0 || !refused(&err) {
-        return Ok(code);
-    }
-    eprintln!("github: GitHub refused Pointman App here, so git runs it again with this machine's own gh login");
+    let Some(line) = refusal(code, &err) else { return Ok(code) };
+    eprintln!(
+        "github: GitHub refused Pointman App (\"{line}\"), so git runs it again with this machine's own gh login"
+    );
     Ok(cmd.stderr(Stdio::inherit()).env(MACHINE_LOGIN, "1").status()?.code().unwrap_or(1))
 }
 
@@ -574,13 +574,42 @@ pub fn run_env(app: Option<&App>, exe: &Path, state: &Path) -> BTreeMap<String, 
 /// What GitHub's CLI would use instead of the machine's own login.
 const TOKEN_VARS: [&str; 4] = ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"];
 
-/// Set on git once GitHub has refused the App's token for a command: its helper answers with the machine's login.
+/// Set, a run's `gh` and git act as this machine's own login straight away: git_command sets it for git's helper
+/// once GitHub has refused the App, and gh says to put it in front of a write it didn't run again.
 pub const MACHINE_LOGIN: &str = "POINTMAN_GITHUB_MACHINE_LOGIN";
 
-/// Whether what gh or git wrote when they failed is GitHub refusing the App's token: a permission the App wasn't given
-/// ("Resource not accessible by integration", 403), or a repo its installation can't see (404, "not found").
-pub fn refused(stderr: &str) -> bool {
-    [
+/// Set, `gh` and git act only as the App and never fall back: for workflow steps, so a permission the App lacks
+/// shows up rather than going out as a person.
+pub const APP_ONLY: &str = "POINTMAN_GITHUB_APP_ONLY";
+
+/// Who a run's `gh` and git act as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Login {
+    /// The App, else this machine's own `gh` login (James, Pointman thread 25602 [29623]).
+    AppThenMachine,
+    /// Only the App (APP_ONLY).
+    AppOnly,
+    /// This machine's own login straight away (MACHINE_LOGIN).
+    Machine,
+}
+
+impl Login {
+    /// From the environment: APP_ONLY wins over MACHINE_LOGIN; empty or `0` is unset.
+    pub fn from_env() -> Login {
+        let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty() && v != "0");
+        match (set(APP_ONLY), set(MACHINE_LOGIN)) {
+            (true, _) => Login::AppOnly,
+            (false, true) => Login::Machine,
+            _ => Login::AppThenMachine,
+        }
+    }
+}
+
+/// When gh or git failed because GitHub refused the App's token, the first line that says so: a permission the App
+/// wasn't given ("Resource not accessible by integration", 403), or a repo its installation can't see (404, "not
+/// found").
+pub fn refusal(code: i32, stderr: &str) -> Option<&str> {
+    const SAYS: [&str; 8] = [
         "not accessible by integration",
         "HTTP 403",
         "HTTP 404",
@@ -589,9 +618,39 @@ pub fn refused(stderr: &str) -> bool {
         "returned error: 404",
         "Repository not found",
         "denied to ",
-    ]
-    .iter()
-    .any(|m| stderr.contains(m))
+    ];
+    (code != 0).then(|| stderr.lines().map(str::trim).find(|l| SAYS.iter().any(|m| l.contains(m)))).flatten()
+}
+
+/// gh's verbs that only read.
+const READS: [&str; 7] = ["view", "list", "status", "checks", "diff", "watch", "search"];
+
+/// Whether a gh command only reads, so running it again can't write twice: a READS verb (`gh pr view`), `gh search`
+/// and `gh status`, and `gh api` sending nothing (no method but GET, no fields without `-X GET`, no `--input`).
+pub fn only_reads(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("search" | "status") => true,
+        Some("api") => api_only_reads(&args[1..]),
+        Some(_) => args.get(1).is_some_and(|v| READS.contains(&v.as_str())),
+        None => false,
+    }
+}
+
+fn api_only_reads(args: &[String]) -> bool {
+    let (mut method, mut fields) = (None, false);
+    let mut it = args.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        if a == "-X" || a == "--method" {
+            method = it.next();
+        } else if let Some(m) = a.strip_prefix("--method=").or_else(|| a.strip_prefix("-X")) {
+            method = Some(m);
+        } else if a == "--input" || a.starts_with("--input=") {
+            return false;
+        } else if ["-f", "-F", "--field", "--raw-field"].iter().any(|f| a.starts_with(f)) {
+            fields = true;
+        }
+    }
+    method.map_or(!fields, |m| m.eq_ignore_ascii_case("GET"))
 }
 
 /// Whether a gh command reads its input from stdin (`--body-file -`, `--input=-`, `-F body=@-`): it can't run twice.
@@ -628,43 +687,58 @@ fn as_machine(gh: &Path) -> Command {
     cmd
 }
 
-/// The App's token for `owner` (None: the first installation's), or why there's none.
-fn app_token(state: &Path, owner: Option<&str>) -> Result<String, String> {
+/// The App's token for `owner` (None: the first installation's) and the account it's for, or why there's none.
+fn app_token(state: &Path, owner: Option<&str>) -> Result<(String, String), String> {
     let kept = Kept::read(state).ok_or_else(|| NOT_YET.to_string())?;
-    kept.token_for(owner, now()).map(|t| t.token.clone())
+    kept.token_for(owner, now()).map(|t| (t.owner.clone(), t.token.clone()))
 }
 
 /// `bin/github gh <state> -- <gh's arguments>`, a run's `gh`: GitHub's CLI with the App's token for the account the
-/// command is about (the first installation's when it names none). With no such token (no App on the board, or an
-/// account it isn't installed on), and once more when GitHub refuses the App's token, it runs as this machine's own
-/// login, and says so.
-pub fn gh_command(state: &Path, args: &[String], cwd: &Path) -> anyhow::Result<i32> {
+/// command is about (the first installation's when it names none). Unless `login` is App-only, with no such token (no
+/// App on the board, or an account it isn't installed on) it runs as this machine's own login, and a read GitHub
+/// refuses the App's token for runs once more that way. A refused write doesn't run again: gh may have written part of
+/// it already (a PR, then its labels). Each time, it says so.
+pub fn gh_command(state: &Path, args: &[String], cwd: &Path, login: Login) -> anyhow::Result<i32> {
     let gh =
         machine_cli(state).context("GitHub's CLI isn't on this machine yet: the github extension is installing it")?;
-    let token = match app_token(state, command_owner(args, cwd).as_deref()) {
-        Ok(token) => token,
+    let token = match login {
+        Login::Machine => Err(format!("{MACHINE_LOGIN} is set")),
+        _ => app_token(state, command_owner(args, cwd).as_deref()),
+    };
+    let (account, token) = match token {
+        Ok(it) => it,
+        Err(why) if login == Login::AppOnly => {
+            eprintln!("github: {why}");
+            return Ok(1);
+        }
         Err(why) => {
             eprintln!("github: {why}, so gh uses this machine's own login");
             return Ok(as_machine(&gh).args(args).status()?.code().unwrap_or(1));
         }
     };
     let (code, err) = keeping_stderr(as_machine(&gh).env("GH_TOKEN", token).args(args))?;
-    if code == 0 || !refused(&err) {
+    let Some(line) = refusal(code, &err) else { return Ok(code) };
+    let refused = format!("GitHub refused Pointman App on {account} (\"{line}\")");
+    if login == Login::AppOnly {
+        eprintln!("github: {refused}");
         return Ok(code);
     }
-    if reads_stdin(args) {
-        eprintln!("github: GitHub refused Pointman App here; this command reads stdin, so it isn't run again as this machine's own login");
+    if !only_reads(args) || reads_stdin(args) {
+        eprintln!(
+            "github: {refused}. It may have written part of this already, so it isn't run again: check what it did, \
+             then run what's left with {MACHINE_LOGIN}=1 in front, as this machine's own login"
+        );
         return Ok(code);
     }
-    eprintln!("github: GitHub refused Pointman App here, so gh runs it again as this machine's own login");
+    eprintln!("github: {refused}, so gh reads it again as this machine's own login");
     Ok(as_machine(&gh).args(args).status()?.code().unwrap_or(1))
 }
 
 /// `bin/github git-credential <state> get`: git's credential helper for https://github.com. It answers `get` with
-/// the App's token for the path's owner (`useHttpPath`), else, as with `gh`, with this machine's own `gh` login: for
-/// an account the App isn't installed on, or when `machine` (GitHub refused the App's token, see `git_command`).
-/// `store` and `erase` do nothing.
-pub fn git_credential(state: &Path, op: &str, input: &str, machine: bool) -> anyhow::Result<String> {
+/// the App's token for the path's owner (`useHttpPath`), else, as with `gh` and unless `login` is App-only, with this
+/// machine's own `gh` login: for an account the App isn't installed on, or with `Login::Machine` (GitHub refused the
+/// App's token, see `git_command`). `store` and `erase` do nothing.
+pub fn git_credential(state: &Path, op: &str, input: &str, login: Login) -> anyhow::Result<String> {
     if op != "get" {
         return Ok(String::new());
     }
@@ -673,10 +747,11 @@ pub fn git_credential(state: &Path, op: &str, input: &str, machine: bool) -> any
         return Ok(String::new());
     }
     let owner = fields.get("path").and_then(|p| owner_of(p));
-    let why = match machine {
-        true => "GitHub refused Pointman App here".to_string(),
-        false => match app_token(state, owner.as_deref()) {
-            Ok(token) => return Ok(format!("username=x-access-token\npassword={token}\n")),
+    let why = match login {
+        Login::Machine => format!("{MACHINE_LOGIN} is set"),
+        _ => match app_token(state, owner.as_deref()) {
+            Ok((_, token)) => return Ok(format!("username=x-access-token\npassword={token}\n")),
+            Err(why) if login == Login::AppOnly => anyhow::bail!("no GitHub password for git: {why}"),
             Err(why) => why,
         },
     };
@@ -909,43 +984,63 @@ mod tests {
         kept(now()).write(dir.path()).unwrap();
         let ours = "protocol=https\nhost=github.com\npath=jamescalam/pointman-cve.git\n\n";
         assert_eq!(
-            git_credential(dir.path(), "get", ours, false).unwrap(),
+            git_credential(dir.path(), "get", ours, Login::AppThenMachine).unwrap(),
             "username=x-access-token\npassword=ghs_jamescalam\n"
         );
         assert_eq!(
-            git_credential(dir.path(), "get", "protocol=https\nhost=gitlab.com\npath=a/b\n", false).unwrap(),
+            git_credential(dir.path(), "get", "protocol=https\nhost=gitlab.com\npath=a/b\n", Login::AppThenMachine)
+                .unwrap(),
             ""
         );
-        assert_eq!(git_credential(dir.path(), "store", "host=github.com\n", false).unwrap(), "");
+        assert_eq!(git_credential(dir.path(), "store", "host=github.com\n", Login::AppThenMachine).unwrap(), "");
 
         // an account the App isn't on, with no gh signed in here: no password, and why
         let elsewhere = "host=github.com\npath=rust-lang/rust.git\n";
-        let err = git_credential(dir.path(), "get", elsewhere, false).unwrap_err();
+        let err = git_credential(dir.path(), "get", elsewhere, Login::AppThenMachine).unwrap_err();
         assert!(
             format!("{err:#}").contains("isn't installed on rust-lang, and this machine's own gh login gave none"),
             "{err:#}"
         );
         with_machine_login(dir.path(), false);
-        assert!(git_credential(dir.path(), "get", elsewhere, false).is_err());
+        assert!(git_credential(dir.path(), "get", elsewhere, Login::AppThenMachine).is_err());
 
         // with gh signed in: the machine's login, for that account, and for any once GitHub refused the App
         with_machine_login(dir.path(), true);
         let machine = "username=jamescalam\npassword=gho_machine\n";
-        assert_eq!(git_credential(dir.path(), "get", elsewhere, false).unwrap(), machine);
-        assert_eq!(git_credential(dir.path(), "get", ours, true).unwrap(), machine);
+        assert_eq!(git_credential(dir.path(), "get", elsewhere, Login::AppThenMachine).unwrap(), machine);
+        assert_eq!(git_credential(dir.path(), "get", ours, Login::Machine).unwrap(), machine);
 
         // no App on the board, or no tokens yet: the machine's login too
         let none = tempfile::tempdir().unwrap();
-        assert!(git_credential(none.path(), "get", "host=github.com\npath=a/b\n", false).is_err());
+        assert!(git_credential(none.path(), "get", "host=github.com\npath=a/b\n", Login::AppThenMachine).is_err());
         with_machine_login(none.path(), true);
-        assert_eq!(git_credential(none.path(), "get", "host=github.com\npath=a/b\n", false).unwrap(), machine);
+        assert_eq!(
+            git_credential(none.path(), "get", "host=github.com\npath=a/b\n", Login::AppThenMachine).unwrap(),
+            machine
+        );
         Kept::default().write(none.path()).unwrap();
-        assert_eq!(git_credential(none.path(), "get", "host=github.com\npath=a/b\n", false).unwrap(), machine);
+        assert_eq!(
+            git_credential(none.path(), "get", "host=github.com\npath=a/b\n", Login::AppThenMachine).unwrap(),
+            machine
+        );
+
+        // App-only (workflow steps): today's error, and the machine's login is never asked
+        let err = git_credential(dir.path(), "get", elsewhere, Login::AppOnly).unwrap_err();
+        assert_eq!(format!("{err:#}"), "no GitHub password for git: Pointman App isn't installed on rust-lang");
+        assert!(git_credential(none.path(), "get", "host=github.com\npath=a/b\n", Login::AppOnly).is_err());
+        assert_eq!(
+            git_credential(dir.path(), "get", ours, Login::AppOnly).unwrap(),
+            "username=x-access-token\npassword=ghs_jamescalam\n"
+        );
     }
 
     #[test]
     fn github_refusing_the_app_is_told_apart_from_other_failures() {
-        for refusal in [
+        let push =
+            "To https://github.com/a/b.git\nremote: Permission to a/b.git denied to pointman-app[bot].\nfatal: x";
+        assert_eq!(refusal(128, push), Some("remote: Permission to a/b.git denied to pointman-app[bot]."));
+        assert_eq!(refusal(0, push), None, "only a failure");
+        for refusal_text in [
             "GraphQL: Resource not accessible by integration (createPullRequest)",
             "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/a/b/statuses/x)",
             "HTTP 404: Not Found (https://api.github.com/repos/a/b)",
@@ -953,7 +1048,7 @@ mod tests {
             "remote: Repository not found.\nfatal: repository 'https://github.com/a/b.git/' not found",
             "remote: Permission to a/b.git denied to pointman-app[bot].\nfatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403",
         ] {
-            assert!(refused(refusal), "{refusal}");
+            assert!(refusal(1, refusal_text).is_some(), "{refusal_text}");
         }
         for other in [
             "GraphQL: Could not resolve to a PullRequest with the number of 9. (repository.pullRequest)",
@@ -961,7 +1056,42 @@ mod tests {
             "! [rejected]        main -> main (non-fast-forward)",
             "error: pathspec 'x' did not match any file(s) known to git",
         ] {
-            assert!(!refused(other), "{other}");
+            assert_eq!(refusal(1, other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn only_reads_run_again() {
+        for cmd in [
+            "pr view 4 -R a/b",
+            "pr list",
+            "pr checks 4",
+            "pr diff 4",
+            "run watch 9",
+            "issue status",
+            "search prs is:open",
+            "status",
+            "api repos/a/b/pulls",
+            "api repos/a/b/issues -X GET -f state=open",
+            "api --method=get repos/a/b",
+        ] {
+            assert!(only_reads(&args(cmd)), "{cmd}");
+        }
+        for cmd in [
+            "pr create --title x",
+            "pr merge 4 --delete-branch",
+            "issue create --label bug",
+            "release create v1 a.tgz",
+            "pr review 4 --approve",
+            "api repos/a/b/issues -f title=x",
+            "api repos/a/b/statuses/s -F state=success",
+            "api -XPOST repos/a/b/forks",
+            "api --method DELETE repos/a/b/git/refs/heads/x",
+            "api graphql -f query=x",
+            "api repos/a/b/contents/x --input f.json",
+            "",
+        ] {
+            assert!(!only_reads(&args(cmd)), "{cmd}");
         }
     }
 
