@@ -468,7 +468,8 @@ fn real_git(state: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// `bin/github git <state> -- <git's arguments>`: git, with the person who started this run credited on a commit.
+/// `bin/github git <state> -- <git's arguments>`: git signed in as the App, with the person who started this run
+/// credited on a commit.
 pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
     let git = real_git(state).context("git isn't on this machine's PATH")?;
     let person = run_person();
@@ -477,6 +478,7 @@ pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
         _ => String::new(),
     };
     let args = git_args(state, &person, &bot, args);
+    let exe = std::env::current_exe().context("where this extension's binary is")?;
     let mut cmd = std::process::Command::new(git);
     if let (Some(at), Some(who)) = (commit_at(&args), coauthor(state, &person)) {
         // the person is the author; Pointman App stays the committer and is the co-author
@@ -484,23 +486,37 @@ pub fn git_command(state: &Path, args: &[String]) -> anyhow::Result<i32> {
             cmd.env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email);
         }
     }
-    let status = cmd.args(args).status()?;
+    let status = cmd.args(signed_in(&exe, state, &args)).status()?;
     Ok(status.code().unwrap_or(1))
 }
 
-/// What a run's environment gets: git asking this extension for GitHub's password (never a
-/// person's keychain, and never a prompt), pushes over https, and, once the board has the App, commits as its bot.
-pub fn run_env(app: Option<&App>, exe: &Path, state: &Path) -> BTreeMap<String, String> {
+/// git's arguments after `git_config` as `-c`s: signed in as the App by itself, not only in a run whose environment
+/// says so (a workflow's step runs this git too, with none of it).
+pub fn signed_in(exe: &Path, state: &Path, args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> =
+        git_config(exe, state).into_iter().flat_map(|(k, v)| ["-c".to_string(), format!("{k}={v}")]).collect();
+    out.extend_from_slice(args);
+    out
+}
+
+/// git asking this extension for GitHub's password (never a person's keychain or gh), and pushes over https.
+pub fn git_config(exe: &Path, state: &Path) -> [(&'static str, String); 5] {
     let helper =
         format!("!{} git-credential {}", sh_quote(&exe.display().to_string()), sh_quote(&state.display().to_string()));
-    let config = [
+    [
         // an empty helper first, so a person's own (the keychain's) isn't asked before this one
         ("credential.https://github.com.helper", String::new()),
         ("credential.https://github.com.helper", helper),
         ("credential.https://github.com.useHttpPath", "true".into()),
         ("url.https://github.com/.pushInsteadOf", "git@github.com:".into()),
         ("url.https://github.com/.pushInsteadOf", "ssh://git@github.com/".into()),
-    ];
+    ]
+}
+
+/// What a run's environment gets: `git_config` (and never a prompt), and, once the board has the App, commits as
+/// its bot.
+pub fn run_env(app: Option<&App>, exe: &Path, state: &Path) -> BTreeMap<String, String> {
+    let config = git_config(exe, state);
     let mut env = BTreeMap::from([
         ("GIT_TERMINAL_PROMPT".to_string(), "0".into()),
         ("GIT_CONFIG_COUNT".into(), config.len().to_string()),
@@ -809,6 +825,24 @@ mod tests {
         assert_eq!(env["GIT_CONFIG_VALUE_1"], "!'/e/bin/github' git-credential '/s'");
         assert_eq!(env["GIT_CONFIG_KEY_3"], "url.https://github.com/.pushInsteadOf");
         assert!(!env.contains_key("GH_TOKEN"), "gh gets its token from the shim, per command");
+    }
+
+    #[test]
+    fn the_shims_git_signs_in_by_itself_before_its_arguments() {
+        let got = signed_in(Path::new("/e/bin/github"), Path::new("/s"), &args("push origin main"));
+        assert_eq!(
+            got[..4],
+            [
+                "-c",
+                "credential.https://github.com.helper=",
+                "-c",
+                "credential.https://github.com.helper=!'/e/bin/github' git-credential '/s'"
+            ]
+        );
+        assert_eq!(got.len(), 13);
+        assert_eq!(got[10..], args("push origin main")[..]);
+        // a commit's place is still found past the -c's, so a person's commit is still credited
+        assert_eq!(commit_at(&signed_in(Path::new("/e"), Path::new("/s"), &args("commit -m x"))), Some(10));
     }
 
     #[test]
