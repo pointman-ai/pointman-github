@@ -50,10 +50,10 @@ fn settled(state: &std::path::Path) {
     }
 }
 
-/// Before the board has Pointman App, runs get no GitHub token at all, not even with an account in the vault: their
-/// `gh` and git say the App isn't set up, git never asks the keychain, and commits aren't the bot's.
+/// Before the board has Pointman App, runs get no GitHub token, not even with an account in the vault: their `gh`
+/// runs as this machine's own login and says why, git never asks the keychain, and commits aren't the bot's.
 #[test]
-fn runs_get_no_token_before_the_board_has_the_app() {
+fn before_the_board_has_the_app_runs_use_the_machines_own_login() {
     let dir = tempfile::tempdir().unwrap();
     let gh = telling_gh(dir.path());
     let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
@@ -74,20 +74,31 @@ fn runs_get_no_token_before_the_board_has_the_app() {
     assert!(env.get("PATH").is_none(), "the manifest names the folder, not PATH: {got}");
     assert_eq!(env["GIT_CONFIG_VALUE_0"], "", "the keychain's helper is reset");
 
-    let out =
-        std::process::Command::new(shims.join("gh")).args(["pr", "list"]).current_dir(dir.path()).output().unwrap();
-    assert!(!out.status.success());
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "", "GitHub's CLI never ran");
-    assert_eq!(String::from_utf8(out.stderr).unwrap(), "github: Pointman App isn't set up on this board yet\n");
+    let out = std::process::Command::new(shims.join("gh"))
+        .args(["pr", "list"])
+        .env("GH_TOKEN", "ghp_from_somewhere_else")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), " pr list\n", "GitHub's CLI ran with no token");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        "github: Pointman App isn't set up on this board yet, so gh uses this machine's own login\n"
+    );
     let asked: Vec<String> =
         node.asked().into_iter().map(|(method, _)| method).filter(|m| m.starts_with("secret.")).collect();
     assert!(asked.is_empty(), "the vault isn't opened: {asked:?}");
 }
 
-/// A `gh` that says which token it was given and what for, and fails when it's asked to.
+/// A `gh` that says which token it was given and what for, fails when it's asked to, and refuses the App's token (any
+/// token) the way GitHub does when it's asked to.
 fn telling_gh(dir: &std::path::Path) -> PathBuf {
     let gh = dir.join("gh");
-    std::fs::write(&gh, "#!/bin/sh\necho \"$GH_TOKEN $*\"\ncase \"$*\" in *fail*) exit 4;; esac\n").unwrap();
+    let script = "#!/bin/sh\necho \"$GH_TOKEN $*\"\n\
+                  case \"$*\" in *refuse*) [ -n \"$GH_TOKEN\" ] && { echo 'HTTP 403: Resource not accessible by integration' >&2; exit 1; };; esac\n\
+                  case \"$*\" in *fail*) exit 4;; esac\n";
+    std::fs::write(&gh, script).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     gh
 }
@@ -145,16 +156,31 @@ fn runs_act_as_pointman_app_once_the_board_has_it() {
         ["pr", "create", "-R", "alai-studios/spark", "--body", "Fixes https://github.com/pointman-ai/x/issues/3"];
     assert!(run(&body).starts_with("ghs_Alai-Studios "), "a link in the body isn't the repo");
 
-    // an account the App isn't on: gh reads with the first installation's token, and says why when it fails
-    let out = std::process::Command::new(shims.join("gh"))
-        .args(["pr", "create", "-R", "rust-lang/rust", "--title", "fail"])
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+    // an account the App isn't on: gh runs as this machine's own login, and says so
+    let gh_in = |args: &[&str]| {
+        std::process::Command::new(shims.join("gh")).args(args).current_dir(dir.path()).output().unwrap()
+    };
+    let out = gh_in(&["pr", "create", "-R", "rust-lang/rust", "--title", "fail"]);
     assert_eq!(out.status.code(), Some(4), "gh's own exit code");
-    assert!(String::from_utf8(out.stdout).unwrap().starts_with("ghs_pointman-ai "));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), " pr create -R rust-lang/rust --title fail\n");
     let why = String::from_utf8(out.stderr).unwrap();
-    assert!(why.contains("Pointman App isn't installed on rust-lang"), "{why}");
+    assert_eq!(why, "github: Pointman App isn't installed on rust-lang, so gh uses this machine's own login\n");
+
+    // GitHub refuses the App's token: once more as this machine's own login, unless it read stdin
+    let out = gh_in(&["pr", "create", "-R", "pointman-ai/x", "--title", "refuse"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let ran = "pr create -R pointman-ai/x --title refuse";
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("ghs_pointman-ai {ran}\n {ran}\n"));
+    let why = String::from_utf8(out.stderr).unwrap();
+    assert!(why.starts_with("HTTP 403: Resource not accessible by integration\n"), "gh's own words first: {why}");
+    assert!(why.ends_with("so gh runs it again as this machine's own login\n"), "{why}");
+    let out = gh_in(&["pr", "create", "-R", "pointman-ai/x", "--title", "refuse", "--body-file", "-"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 1, "run once");
+    assert!(String::from_utf8(out.stderr).unwrap().contains("reads stdin, so it isn't run again"));
+    let out = gh_in(&["pr", "view", "-R", "pointman-ai/x", "--title", "fail"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(String::from_utf8(out.stdout).unwrap().lines().count(), 1, "a failure that isn't a refusal runs once");
 
     // git's helper, as git calls it
     let mut git = std::process::Command::new(env!("CARGO_BIN_EXE_github"))
@@ -167,4 +193,47 @@ fn runs_act_as_pointman_app_once_the_board_has_it() {
     git.stdin.take().unwrap().write_all(b"protocol=https\nhost=github.com\npath=Alai-Studios/spark.git\n\n").unwrap();
     let out = git.wait_with_output().unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "username=x-access-token\npassword=ghs_Alai-Studios\n");
+}
+
+/// A push GitHub refuses the App's token for runs once more, with git's helper told to answer as this machine's own
+/// login; a refused command that doesn't talk to GitHub, and a push that fails otherwise, run once.
+#[test]
+fn a_push_github_refuses_the_app_for_runs_again_as_the_machines_login() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let git = bin.join("git");
+    let script = "#!/bin/sh\necho \"ran ${POINTMAN_GITHUB_MACHINE_LOGIN:-app}\" >>\"$LOG\"\n\
+                  [ -n \"$POINTMAN_GITHUB_MACHINE_LOGIN\" ] && exit 0\n\
+                  case \"$*\" in *other*) echo 'error: failed to push some refs' >&2; exit 1;; esac\n\
+                  echo \"remote: Permission to a/b.git denied to pointman-app[bot].\" >&2\n\
+                  echo \"fatal: unable to access 'https://github.com/a/b.git/': The requested URL returned error: 403\" >&2\n\
+                  exit 128\n";
+    std::fs::write(&git, script).unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let state = dir.path().join("state");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let log = dir.path().join("log");
+    let run = |args: &[&str]| {
+        let _ = std::fs::remove_file(&log);
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_github"))
+            .args(["git", &state.to_string_lossy(), "--"])
+            .args(args)
+            .env("PATH", &path)
+            .env("LOG", &log)
+            .env_remove("POINTMAN_GITHUB_MACHINE_LOGIN")
+            .output()
+            .unwrap();
+        (out.status.code(), std::fs::read_to_string(&log).unwrap_or_default(), String::from_utf8(out.stderr).unwrap())
+    };
+
+    let (code, ran, said) = run(&["push", "origin", "x"]);
+    assert_eq!((code, ran.as_str()), (Some(0), "ran app\nran 1\n"), "{said}");
+    assert!(said.contains("returned error: 403\n"), "git's own words are passed on: {said}");
+    assert!(said.ends_with("so git runs it again with this machine's own gh login\n"), "{said}");
+
+    let (code, ran, _) = run(&["push", "other", "x"]);
+    assert_eq!((code, ran.as_str()), (Some(1), "ran app\n"));
+    let (code, ran, _) = run(&["commit", "-m", "x"]);
+    assert_eq!((code, ran.as_str()), (Some(128), "ran app\n"));
 }

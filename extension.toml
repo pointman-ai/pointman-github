@@ -5,9 +5,9 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.11.1"
+version = "0.12.0"
 publisher = "aurelio"
-summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App."
+summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App, else as the machine's gh login."
 node = ">=0.4.4"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
@@ -17,16 +17,17 @@ runtime = "binary"
 
 [permissions]
 network = true
-drives_apps = ["gh"]             # GitHub's CLI: GitHub is asked as Pointman App, with the board's tokens
+drives_apps = ["gh"]             # GitHub's CLI: GitHub is asked as Pointman App, else as the machine's own login
 
 # what agents write on GitHub goes out as Pointman App's bot: they're told to write about the change, never about
 # their person or how they work (James, Pointman thread 8446 [18054]: no "waits for James's review")
 [behavior]
 skill = "SKILL.md"
 
-# agents' runs act on GitHub as Pointman App, and only as it (MB-707): `gh` first on their PATH asks this extension
-# for the token for the repo's owner, git asks it for GitHub's password (GIT_CONFIG_*, never a prompt), pushes to ssh
-# remotes go over https, and commits are the App's bot's. Until the board has the App, `gh` and pushes say so.
+# agents' runs act on GitHub as Pointman App (MB-707): `gh` first on their PATH asks this extension for the token for
+# the repo's owner, git asks it for GitHub's password (GIT_CONFIG_*, never a prompt), pushes to ssh remotes go over
+# https, and commits are the App's bot's. Where the App can't act, both use the machine's own `gh` login (EXT-116;
+# James, Pointman thread 25602 [29623]), and say so.
 [sessions]
 clients = ["claude", "codex"]
 path = ["app/bin"]                # the runs' `gh` shim, put first on PATH by the node
