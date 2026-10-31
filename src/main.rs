@@ -1,12 +1,11 @@
 //! The extension's process: the node starts it (`bin/github`, from the extension's folder) and talks to it
 //! over stdin and stdout. It installs GitHub's CLI where there's none, and has agents' runs act on GitHub as
-//! Pointman App, with tokens from the board kept fresh (`app`). There's no other account: until the board has the
-//! App, runs' `gh` and git pushes say so (MB-707). GitHub's pages open in the apps' web panel (James, Pointman
-//! thread 8446).
+//! Pointman App, with tokens from the board kept fresh (`app`). Until the board has the App, or where it can't act, runs' `gh` and git use this machine's own `gh` login (MB-707, EXT-116). GitHub's pages
+//! open in the apps' web panel (James, Pointman thread 8446).
 //!
-//! A run's `gh` and git call it back as `bin/github token <state> -- <gh's arguments>`, `bin/github why <state> --
-//! <gh's arguments>` and `bin/github git-credential <state> <get|store|erase>`: those answer from the state folder
-//! and exit.
+//! A run's `gh` and git call it back as `bin/github gh <state> -- <gh's arguments>`, `bin/github git <state> --
+//! <git's arguments>` and `bin/github git-credential <state> <get|store|erase>`: those act from the state folder and
+//! exit.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -80,7 +79,9 @@ fn check_app(h: &Handle, board: &Mutex<Board>, now: bool) -> Option<Option<App>>
             Ok(app) => {
                 let had = b.said.as_ref().map(Option::is_some);
                 match (had, app.is_some()) {
-                    (Some(true), false) => h.log("the board has no Pointman App now: runs' gh and git pushes stop"),
+                    (Some(true), false) => {
+                        h.log("the board has no Pointman App now: runs' gh and git use this machine's own gh login")
+                    }
                     (Some(false) | None, true) => h.log("the board has Pointman App: runs act on GitHub as it"),
                     _ => {}
                 }
@@ -141,51 +142,34 @@ fn app_env(h: &Handle, app: Option<&App>) -> anyhow::Result<BTreeMap<String, Str
     Ok(app::run_env(app, &exe, &state))
 }
 
-/// `bin/github token|why <state> -- <gh's arguments>` and `bin/github git-credential <state> <op>`, from a run's
-/// `gh` and git: they answer from the state folder, and the process ends.
+/// `bin/github gh <state> -- <gh's arguments>`, `bin/github git <state> -- <git's arguments>` and `bin/github
+/// git-credential <state> <op>`, from a run's `gh` and git: they act from the state folder, and the process ends.
 fn helper(argv: &[String]) -> Option<i32> {
     let (word, state) = (argv.get(1)?.as_str(), argv.get(2).map(Path::new));
-    let answer = match (word, state) {
-        (word @ ("token" | "why"), Some(state)) => {
-            let rest = &argv[3..];
-            let args = rest.strip_prefix(&["--".to_string()][..]).unwrap_or(rest);
+    let rest = argv.get(3..).unwrap_or_default();
+    let args = rest.strip_prefix(&["--".to_string()][..]).unwrap_or(rest);
+    let ran = match (word, state) {
+        ("gh", Some(state)) => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            match word {
-                "token" => app::token_command(state, args, &cwd),
-                _ => Ok(app::why_command(state, args, &cwd)),
-            }
+            app::gh_command(state, args, &cwd, app::Login::from_env())
         }
-        ("git", Some(state)) => {
-            let rest = &argv[3..];
-            let args = rest.strip_prefix(&["--".to_string()][..]).unwrap_or(rest);
-            return Some(match app::git_command(state, args) {
-                Ok(code) => code,
-                Err(e) => {
-                    eprintln!("github: {e:#}");
-                    1
-                }
-            });
-        }
+        ("git", Some(state)) => app::git_command(state, args, app::Login::from_env()),
         ("git-credential", Some(state)) => {
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
-            app::git_credential(state, argv.get(3).map(String::as_str).unwrap_or("get"), &input)
+            let op = argv.get(3).map(String::as_str).unwrap_or("get");
+            app::git_credential(state, op, &input, app::Login::from_env()).map(|text| {
+                print!("{text}");
+                0
+            })
         }
-        ("token" | "why" | "git" | "git-credential", None) => {
-            Err(anyhow::anyhow!("usage: github {word} <state folder> …"))
-        }
+        ("gh" | "git" | "git-credential", None) => Err(anyhow::anyhow!("usage: github {word} <state folder> …")),
         _ => return None,
     };
-    Some(match answer {
-        Ok(text) => {
-            print!("{text}");
-            0
-        }
-        Err(e) => {
-            eprintln!("github: {e:#}");
-            1
-        }
-    })
+    Some(ran.unwrap_or_else(|e| {
+        eprintln!("github: {e:#}");
+        1
+    }))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -221,7 +205,7 @@ fn main() -> anyhow::Result<()> {
         });
     });
 
-    // agents' runs act on GitHub as Pointman App, and only as it ([sessions] in extension.toml)
+    // agents' runs act on GitHub as Pointman App, else as this machine's own gh login ([sessions] in extension.toml)
     let (hh, b) = (h.clone(), board.clone());
     ext.on(move |_: SessionPrepareRequest| {
         // asked here only before the first time behind: a run's start never waits on it otherwise

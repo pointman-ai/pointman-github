@@ -1,11 +1,13 @@
 ---
 name: github
-description: Writing on GitHub (pull requests, issues, comments, reviews, commits) from a run on a machine with the GitHub extension. It goes out as Pointman App, GitHub's bot for Pointman.
+description: Writing on GitHub (pull requests, issues, comments, reviews, commits) from a run on a machine with the GitHub extension. It goes out as Pointman App, GitHub's bot for Pointman, or as the machine's own gh login where the App can't reach.
 ---
 
 # Writing on GitHub as Pointman App
 
 In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The exception is a commit in a run a person started: it is authored as that person, with the App as committer and `Co-authored-by`, added by the `git` the extension gives you. Don't write that line or set the author yourself. The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
+
+Where the App can't act (it isn't installed on the repo's account, or GitHub refuses it), `gh` and git use this machine's own `gh` login instead, and say so in a line starting `github:`. What you do then shows on GitHub as that login's person, not the bot.
 
 The people who read it know the repo, not you or Pointman's board, so write for them:
 
@@ -21,4 +23,4 @@ The people who read it know the repo, not you or Pointman's board, so write for 
 | "James asked me to fix the flaky notifications tests." | "Fixes the flaky notifications tests." |
 | "Approved by James in Pointman thread 4159." | (nothing: say it to your person on the board) |
 
-**When GitHub says no.** "Pointman App isn't set up on this board yet", "isn't installed" on an account, or a 403 or 404 on a repo you know is there, means the App can't reach it yet. Tell your person on the board which account or repo it was. Never get around it with another token, `gh auth login`, the machine's own `gh` by its full path, or git settings of your own.
+**When the App can't reach a repo.** A `github:` line saying `gh` or git used "this machine's own login" is allowed: carry on. Tell your person on the board which account or repo it was and what GitHub refused, so they can install the App there or give it the permission. If GitHub refuses the App on a write (create, merge, comment, `gh api` sending something), `gh` doesn't run it again, because it may have done part of it: check what it did, then run what's left with `POINTMAN_GITHUB_MACHINE_LOGIN=1` in front. If the machine's login fails too, tell your person. Never sign in yourself (`gh auth login`), set a token, call another `gh` by its full path, or change git's credential settings.

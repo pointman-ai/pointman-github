@@ -1,7 +1,7 @@
 //! GitHub on Pointman's machines (James, Pointman thread 649 [4443], [4500]): GitHub's CLI on each node,
-//! installed where there's none (`install`), and agents' runs acting on GitHub as Pointman App (`app`), never as a
-//! person's account (MB-707: the vault's accounts and their sign-in went in 0.10.0). GitHub's pages open in the apps'
-//! web panel (James, Pointman thread 8446): the viewer and its pane that were here went in 0.6.0.
+//! installed where there's none (`install`), and agents' runs acting on GitHub as Pointman App (`app`), else as this
+//! machine's own `gh` login (MB-707, EXT-116: the vault's accounts and their sign-in went in 0.10.0). GitHub's pages
+//! open in the apps' web panel (James, Pointman thread 8446): the viewer and its pane that were here went in 0.6.0.
 
 pub mod app;
 pub mod install;
