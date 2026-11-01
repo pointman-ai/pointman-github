@@ -17,7 +17,7 @@ pointman add github
   checksums. No Homebrew, no sudo, nothing outside that folder. The `cli` setting points it at another
   `gh` instead.
 - **Agents act as Pointman App:** once your board has the App installed on an account, each run the node starts
-  (Claude Code or Codex) acts on that account's repos as the App's bot:
+  (Claude Code, Codex or OpenCode) acts on that account's repos as the App's bot:
   - The board gives the machine an hour-long installation token for each account the App is installed on. The
     App's key stays with the board; the extension keeps the tokens fresh in its state folder, readable only by
     the machine's user.

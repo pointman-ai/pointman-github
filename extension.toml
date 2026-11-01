@@ -5,7 +5,7 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.12.0"
+version = "0.12.1"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App, else as the machine's gh login."
 node = ">=0.4.4"
@@ -29,7 +29,7 @@ skill = "SKILL.md"
 # https, and commits are the App's bot's. Where the App can't act, both use the machine's own `gh` login (EXT-116;
 # James, Pointman thread 25602 [29623]), and say so.
 [sessions]
-clients = ["claude", "codex"]
+clients = ["claude", "codex", "opencode"]
 path = ["app/bin"]                # the runs' `gh` shim, put first on PATH by the node
 env = [
   "GIT_TERMINAL_PROMPT",
