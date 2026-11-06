@@ -411,10 +411,10 @@ pub fn write_shim(
     write_script(&dir, "gh", &shim(exe, state, gh))
 }
 
-/// The `git` a run finds first: it is git, but a commit in a run a person's post started is theirs, with Pointman App as co-author (MB-726).
+/// The `git` a run finds first: it is git, but a commit in a run a person's post started is theirs, with Pointman as co-author (MB-726).
 pub fn git_shim(exe: &Path, state: &Path) -> String {
     format!(
-        "#!/bin/sh\n# git for agents' runs: a commit in a run a person started is theirs, with Pointman App as co-author (MB-726)\nexec {} git {} -- \"$@\"\n",
+        "#!/bin/sh\n# git for agents' runs: a commit in a run a person started is theirs, with Pointman as co-author (MB-726)\nexec {} git {} -- \"$@\"\n",
         sh_quote(&exe.display().to_string()),
         sh_quote(&state.display().to_string())
     )
@@ -454,12 +454,17 @@ pub fn talks_to_github(args: &[String]) -> bool {
     subcommand_at(args).is_some_and(|i| NETWORK.contains(&args[i].as_str()))
 }
 
-/// git's arguments with Pointman App credited as co-author, when this is a `commit` in a run a person's post
-/// started and they have an entry (they become the author, see `git_command`); else the arguments as they are.
+/// The co-author on a commit in a run a person started. GitHub names a co-author by the account that owns its email
+/// (the App's bot email shows as `pointman-app[bot]`), so this email is one no account has, and GitHub shows the name.
+pub const COAUTHOR: &str = "Pointman <noreply@pointman.ai>";
+
+/// git's arguments with Pointman credited as co-author (`COAUTHOR`), when this is a `commit` in a run a person's post
+/// started, they have an entry (they become the author, see `git_command`) and the App commits (`bot`); else the
+/// arguments as they are.
 pub fn git_args(state: &Path, person: &str, bot: &str, args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
     if let (Some(at), Some(_), false) = (commit_at(args), coauthor(state, person), bot.is_empty()) {
-        let trailer = format!("Co-authored-by: {bot}");
+        let trailer = format!("Co-authored-by: {COAUTHOR}");
         if !args[at..].iter().any(|a| a == &format!("--trailer={trailer}")) {
             out.splice(at + 1..at + 1, ["--trailer".to_string(), trailer]);
         }
@@ -508,7 +513,7 @@ pub fn git_command(state: &Path, args: &[String], login: Login) -> anyhow::Resul
     let exe = std::env::current_exe().context("where this extension's binary is")?;
     let mut cmd = Command::new(git);
     if let (Some(at), Some(who)) = (commit_at(&args), coauthor(state, &person)) {
-        // the person is the author; Pointman App stays the committer and is the co-author
+        // the person is the author; Pointman App stays the committer, and Pointman is the co-author
         if let (true, Some((name, email))) = (at < args.len() && !bot.is_empty(), split_identity(&who)) {
             cmd.env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email);
         }
@@ -795,7 +800,11 @@ mod tests {
         let dir = state_with(json!({"james": who}));
         let bot = "pointman-app[bot] <1+pointman-app[bot]@users.noreply.github.com>";
         let got = git_args(dir.path(), "james", bot, &args("-C /r commit -m hi"));
-        assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", &format!("Co-authored-by: {bot}"), "-m", "hi"]));
+        let trailer = "Co-authored-by: Pointman <noreply@pointman.ai>";
+        assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", trailer, "-m", "hi"]));
+        // asked again with the same trailer, it isn't added twice
+        let again = git_args(dir.path(), "james", bot, &argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
+        assert_eq!(again, argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
         assert_eq!(split_identity(who), Some(("James", "1+jamescalam@users.noreply.github.com")));
     }
 
