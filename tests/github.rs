@@ -119,6 +119,55 @@ fn board(params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
     })
 }
 
+#[test]
+fn configured_author_survives_automatic_wakes_but_never_replaces_another_person() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("git");
+    std::fs::write(&fake, "#!/bin/sh\nprintf 'author:%s <%s>\\ncommitter:%s <%s>\\n' \"$GIT_AUTHOR_NAME\" \"$GIT_AUTHOR_EMAIL\" \"$GIT_COMMITTER_NAME\" \"$GIT_COMMITTER_EMAIL\"\nprintf 'arg:%s\\n' \"$@\"\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
+        .binary(env!("CARGO_BIN_EXE_github"))
+        .settings(json!({"cli": fake_gh().to_string_lossy(), "default_author": "james",
+            "coauthors": {"james": "James <j@example.com>", "sam": "Sam <s@example.com>"}}))
+        .method("core.call", board)
+        .start()
+        .unwrap();
+    let state = node.state_dir_path().to_path_buf();
+    settled(&state);
+    let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
+    let shims = state.join("app/bin");
+    let person_file = dir.path().join("person");
+    let run = |person: &str, file: Option<&std::path::Path>| {
+        let mut command = std::process::Command::new(shims.join("git"));
+        for (key, value) in got["env"].as_object().unwrap() {
+            command.env(key, value.as_str().unwrap());
+        }
+        command
+            .env("PATH", std::env::join_paths([shims.as_path(), dir.path(), std::path::Path::new("/bin")]).unwrap())
+            .env("MB_RUN_PERSON", person)
+            .env_remove("MB_RUN_PERSON_FILE");
+        if let Some(file) = file {
+            command.env("MB_RUN_PERSON_FILE", file);
+        }
+        let out = command.args(["commit", "-m", "continued"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    for output in [run("", None), {
+        std::fs::write(&person_file, "").unwrap();
+        run("sam", Some(&person_file)) // the resident file takes precedence over old environment
+    }] {
+        assert!(output.contains("author:James <j@example.com>"), "{output}");
+        assert!(output.contains("committer:pointman-app[bot]"), "{output}");
+        assert!(output.contains("arg:Co-authored-by: Pointman <noreply@pointman.ai>"), "{output}");
+    }
+    assert!(run("sam", None).contains("author:Sam <s@example.com>"));
+    for output in [run("unknown", None), run("james", Some(&dir.path().join("missing")))] {
+        assert!(output.contains("author:pointman-app[bot]"), "{output}");
+        assert!(!output.contains("Co-authored-by"), "{output}");
+    }
+}
+
 /// Once the board has Pointman App, runs act as it: `gh` first on their PATH gets the token for the repo's owner,
 /// git gets it as GitHub's password, and commits are the bot's.
 #[test]

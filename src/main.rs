@@ -96,8 +96,14 @@ fn check_app(h: &Handle, board: &Mutex<Board>, now: bool) -> Option<Option<App>>
 /// The `gh` runs find first: GitHub's CLI with the App's token, or, while there's no CLI here, one that says so.
 fn write_shim(h: &Handle) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("where this extension's binary is")?;
-    app::write_shim(&exe, &state(h), cli(h).as_deref(), &h.settings()["coauthors"])
-        .context("couldn't write the runs' gh")?;
+    app::write_shim(
+        &exe,
+        &state(h),
+        cli(h).as_deref(),
+        &h.settings()["coauthors"],
+        h.settings()["default_author"].as_str().unwrap_or_default(),
+    )
+    .context("couldn't write the runs' gh")?;
     Ok(())
 }
 

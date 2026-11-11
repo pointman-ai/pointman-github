@@ -48,6 +48,17 @@ Pointman itself.
 | Setting | Default | |
 |---|---|---|
 | `cli` | empty | GitHub's CLI, when it isn't on the node's PATH or in /opt/homebrew/bin or /usr/local/bin; empty, the extension installs its own |
+| `coauthors` | `{}` | Pointman handles mapped to `Name <email>` commit authors |
+| `default_author` | empty | A handle from `coauthors` to credit on automatic runs too |
+
+To keep an owner's commit credit through agent handoffs, CI reports and timer wakes, set
+`default_author = "james"` alongside their entry in `coauthors`. Commits then name that person as author,
+the App as committer, and `Pointman <noreply@pointman.ai>` as co-author. A person directly starting a run
+takes precedence; an unmapped person stays App-only. An unreadable run-person file also stays App-only.
+Leaving `default_author` empty keeps automatic runs App-only.
+
+A pull request has one creator: the account whose token opens it. PRs opened with the App still show
+the App as creator; the author and co-author above appear on their commits. Existing commits are unchanged.
 
 ## Install and upgrade
 

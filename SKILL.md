@@ -5,7 +5,11 @@ description: Writing on GitHub (pull requests, issues, comments, reviews, commit
 
 # Writing on GitHub as Pointman App
 
-In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The exception is a commit in a run a person started: it is authored as that person, with the App as committer and `Co-authored-by: Pointman`, added by the `git` the extension gives you. Don't write that line or set the author yourself. The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
+The extension may also have a `default_author` configured for automatic runs: their commits credit
+that person with Pointman as co-author, including after agent handoffs and timer wakes. A directly
+named person takes precedence. PRs themselves still have the App as their single creator.
+
+In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The exception is a commit in a run a person started, or one with a configured default_author: it is authored as that person, with the App as committer and `Co-authored-by: Pointman`, added by the `git` the extension gives you. Don't write that line or set the author yourself. The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
 
 Where the App can't act (it isn't installed on the repo's account, or GitHub refuses it), `gh` and git use this machine's own `gh` login instead, and say so in a line starting `github:`. What you do then shows on GitHub as that login's person, not the bot.
 

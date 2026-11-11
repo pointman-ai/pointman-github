@@ -395,11 +395,13 @@ pub fn write_shim(
     state: &Path,
     gh: Option<&Path>,
     coauthors: &serde_json::Value,
+    default_author: &str,
 ) -> anyhow::Result<PathBuf> {
     let dir = shim_dir(state);
     std::fs::create_dir_all(&dir)?;
     write_script(&dir, "git", &git_shim(exe, state))?;
     write_script(&dir, "coauthors.json", &coauthors.to_string())?;
+    write_script(&dir, "default-author", default_author)?;
     match gh {
         Some(gh) => {
             write_script(&state.join("app"), "cli", &gh.display().to_string())?;
@@ -422,6 +424,15 @@ pub fn git_shim(exe: &Path, state: &Path) -> String {
 
 /// `Name <email>` for a person's handle, as the extension's `coauthors` setting names them.
 fn coauthor(state: &Path, person: &str) -> Option<String> {
+    // Only an automatic run may use the configured fallback. An unmapped person must never
+    // silently become someone else.
+    let fallback;
+    let person = if person.is_empty() {
+        fallback = std::fs::read_to_string(shim_dir(state).join("default-author")).ok()?;
+        fallback.trim()
+    } else {
+        person
+    };
     let text = std::fs::read_to_string(shim_dir(state).join("coauthors.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let who = v.get(person)?.as_str()?.trim();
@@ -458,8 +469,8 @@ pub fn talks_to_github(args: &[String]) -> bool {
 /// (the App's bot email shows as `pointman-app[bot]`), so this email is one no account has, and GitHub shows the name.
 pub const COAUTHOR: &str = "Pointman <noreply@pointman.ai>";
 
-/// git's arguments with Pointman credited as co-author (`COAUTHOR`), when this is a `commit` in a run a person's post
-/// started, they have an entry (they become the author, see `git_command`) and the App commits (`bot`); else the
+/// git's arguments with Pointman credited as co-author (`COAUTHOR`), when this is a `commit` with a directly named person
+/// or an explicitly configured default author, they have an entry (they become the author, see `git_command`) and the App commits (`bot`); else the
 /// arguments as they are.
 pub fn git_args(state: &Path, person: &str, bot: &str, args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
@@ -482,10 +493,10 @@ fn split_identity(who: &str) -> Option<(&str, &str)> {
 /// The person whose post started this run: the handle in the file `MB_RUN_PERSON_FILE` names (a resident session's
 /// person changes from one post to the next, and the node rewrites the file before each), else `MB_RUN_PERSON`. A file
 /// that can't be read means no person, so the commit stays the App's.
-fn run_person() -> String {
+fn run_person() -> Option<String> {
     match std::env::var_os("MB_RUN_PERSON_FILE").filter(|f| !f.is_empty()) {
-        Some(f) => std::fs::read_to_string(f).map(|t| t.trim().to_string()).unwrap_or_default(),
-        None => std::env::var("MB_RUN_PERSON").unwrap_or_default(),
+        Some(f) => std::fs::read_to_string(f).ok().map(|t| t.trim().to_string()),
+        None => Some(std::env::var("MB_RUN_PERSON").unwrap_or_default()),
     }
 }
 
@@ -509,10 +520,10 @@ pub fn git_command(state: &Path, args: &[String], login: Login) -> anyhow::Resul
         (Ok(n), Ok(e)) if !n.is_empty() && !e.is_empty() => format!("{n} <{e}>"),
         _ => String::new(),
     };
-    let args = git_args(state, &person, &bot, args);
+    let args = person.as_deref().map(|person| git_args(state, person, &bot, args)).unwrap_or_else(|| args.to_vec());
     let exe = std::env::current_exe().context("where this extension's binary is")?;
     let mut cmd = Command::new(git);
-    if let (Some(at), Some(who)) = (commit_at(&args), coauthor(state, &person)) {
+    if let (Some(at), Some(who)) = (commit_at(&args), person.as_deref().and_then(|p| coauthor(state, p))) {
         // the person is the author; Pointman App stays the committer, and Pointman is the co-author
         if let (true, Some((name, email))) = (at < args.len() && !bot.is_empty(), split_identity(&who)) {
             cmd.env("GIT_AUTHOR_NAME", name).env("GIT_AUTHOR_EMAIL", email);
@@ -818,6 +829,28 @@ mod tests {
         }
         let none = tempfile::tempdir().unwrap();
         assert_eq!(git_args(none.path(), "james", "bot <b@x>", &args("commit -m x")), args("commit -m x"));
+    }
+
+    #[test]
+    fn automatic_runs_use_only_an_explicit_default_author() {
+        let who = "James <1+j@users.noreply.github.com>";
+        let other = "Sam <2+s@users.noreply.github.com>";
+        let dir = state_with(json!({"james": who, "sam": other}));
+        let file = shim_dir(dir.path()).join("default-author");
+        let command = args("commit -m continued");
+        assert_eq!(git_args(dir.path(), "", "bot <b@x>", &command), command);
+        std::fs::write(&file, "james").unwrap();
+        assert_eq!(coauthor(dir.path(), "").as_deref(), Some(who));
+        assert_eq!(coauthor(dir.path(), "sam").as_deref(), Some(other));
+        assert_eq!(coauthor(dir.path(), "unknown"), None);
+        assert!(git_args(dir.path(), "", "bot <b@x>", &command).contains(&format!("Co-authored-by: {COAUTHOR}")));
+        assert_eq!(git_args(dir.path(), "unknown", "bot <b@x>", &command), command);
+        assert_eq!(git_args(dir.path(), "", "", &command), command);
+        assert_eq!(git_args(dir.path(), "", "bot <b@x>", &args("push origin main")), args("push origin main"));
+        std::fs::write(&file, "unknown").unwrap();
+        assert_eq!(coauthor(dir.path(), ""), None);
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(coauthor(dir.path(), ""), None);
     }
 
     fn args(s: &str) -> Vec<String> {
@@ -1138,9 +1171,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gh = dir.path().join("gh");
         std::fs::write(&gh, "").unwrap();
-        write_shim(Path::new("/e/github"), dir.path(), Some(&gh), &json!({})).unwrap();
+        write_shim(Path::new("/e/github"), dir.path(), Some(&gh), &json!({}), "").unwrap();
         assert_eq!(machine_cli(dir.path()), Some(gh));
-        write_shim(Path::new("/e/github"), dir.path(), None, &json!({})).unwrap();
+        write_shim(Path::new("/e/github"), dir.path(), None, &json!({}), "").unwrap();
         assert_eq!(machine_cli(dir.path()), None);
     }
 
