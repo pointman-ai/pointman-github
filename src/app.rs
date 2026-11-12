@@ -878,7 +878,8 @@ mod tests {
         let trailer = "Co-authored-by: Pointman <noreply@pointman.ai>";
         assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", trailer, "-m", "hi"]));
         // asked again with the same trailer, it isn't added twice
-        let again = git_args(dir.path(), "james", None, bot, &argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
+        let again =
+            git_args(dir.path(), "james", None, bot, &argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
         assert_eq!(again, argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
         assert_eq!(split_identity(who), Some(("James", "1+jamescalam@users.noreply.github.com")));
     }
@@ -971,7 +972,10 @@ mod tests {
         let again = argv(&["commit", &format!("--trailer={theirs}"), "-m", "hi"]);
         let got = git_args(dir.path(), "james", claude.as_deref(), "bot <b@x>", &again);
         assert_eq!(got, argv(&["commit", "--trailer", ours, &format!("--trailer={theirs}"), "-m", "hi"]));
-        assert_eq!(git_args(dir.path(), "scene", claude.as_deref(), "bot <b@x>", &args("commit -m x")), args("commit -m x"));
+        assert_eq!(
+            git_args(dir.path(), "scene", claude.as_deref(), "bot <b@x>", &args("commit -m x")),
+            args("commit -m x")
+        );
         // and no client file at all: the client is no one
         assert_eq!(client_coauthor(tempfile::tempdir().unwrap().path(), "claude"), None);
     }
