@@ -1083,6 +1083,8 @@ mod tests {
         assert_eq!(coauthor(dir.path(), ""), None);
         // one kept longer than MACHINE_AUTHOR_FOR without being verified again (the extension stopped asking, the
         // machine restarted): no one
+        refresh_machine_author(dir.path(), Some(&gh)).unwrap();
+        assert_eq!(coauthor(dir.path(), "").as_deref(), Some(me));
         let old = SystemTime::now() - MACHINE_AUTHOR_FOR - std::time::Duration::from_secs(1);
         std::fs::File::options().write(true).open(machine_author_file(dir.path())).unwrap().set_modified(old).unwrap();
         assert_eq!(coauthor(dir.path(), ""), None);
