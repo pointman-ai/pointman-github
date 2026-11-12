@@ -1003,8 +1003,9 @@ mod tests {
         let with_sam = json!({"sam": sam}).to_string();
         let bad_sam = json!({"sam": "no email"}).to_string();
         // (coauthors.json, default-author, machine account) → (no person, "james", "sam")
+        type Row<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, [Option<&'a str>; 3]);
         #[rustfmt::skip]
-        let rows: [(Option<&str>, Option<&str>, Option<&str>, [Option<&str>; 3]); 13] = [
+        let rows: [Row; 13] = [
             // nothing configured: runs no person started credit the machine's account; a person's run that
             // isn't mapped stays the App's, the machine's person included (EXT-148)
             (Some("{}"), Some(""), Some(me), [Some(me), None, None]),
