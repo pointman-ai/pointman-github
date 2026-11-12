@@ -3,9 +3,9 @@
 #
 # Push a tag that's extension.toml's version (`git tag v0.7.0 && git push origin v0.7.0`): each
 # platform is built on its own runner and packed as <id>-<version>-<platform>.tar.gz, the files at
-# its top (extension.toml, bin/<id>, README.md, LICENSE). Then one job makes the release with every
-# archive attached. gh keeps it a draft until they're all up, so core's `released` delivery finds
-# each platform in `platforms`; one missing is refused.
+# its top (extension.toml, bin/<id>, README.md, LICENSE). A prepare job creates a draft release;
+# each build uploads its archive directly there, without Actions artifact storage. Only after
+# all builds succeed and the complete asset set is checked does the last job publish the draft.
 #
 # Linux builds are musl, so static: they run on any distribution, NixOS included, whose loader
 # isn't where a glibc build looks for it. Both Macs build on macos-15, the Intel one cross-compiled
@@ -18,13 +18,41 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   BIN: ""                 # the cargo binary's name, when it isn't the extension's id
 
 jobs:
+  prepare:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      id: ${{ steps.metadata.outputs.id }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Its id and version, and the tag's
+        id: metadata
+        run: python3 scripts/release_assets.py metadata extension.toml "$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+      - name: Create or resume the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName > release.json; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --generate-notes
+            gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName > release.json
+          fi
+          python3 scripts/release_assets.py check-draft extension.toml "$GITHUB_REF_NAME" < release.json
+
   build:
+    needs: prepare
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - { platform: macos-arm64, runner: blacksmith-6vcpu-macos-15, target: aarch64-apple-darwin, test: true }
@@ -34,23 +62,18 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
+      ID: ${{ needs.prepare.outputs.id }}
+      VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Its id and version, and the tag's
-        run: |
-          id=$(sed -n 's/^id = "\(.*\)"/\1/p' extension.toml | head -1)
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' extension.toml | head -1)
-          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
-            echo "the tag is $GITHUB_REF_NAME but extension.toml's version is $version" >&2
-            exit 1
-          fi
-          echo "ID=$id" >> "$GITHUB_ENV"
-          echo "VERSION=$version" >> "$GITHUB_ENV"
       - if: matrix.test
         run: cargo test --locked --target ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
@@ -61,21 +84,27 @@ jobs:
           chmod 755 "pkg/bin/$ID"
           cp extension.toml SKILL.md README.md LICENSE pkg/
           tar -czf "$ID-$VERSION-${{ matrix.platform }}.tar.gz" -C pkg extension.toml SKILL.md bin README.md LICENSE
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.platform }}
-          path: "*.tar.gz"
-          if-no-files-found: error
-
-  release:
-    needs: build
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: The release, with every platform's build
+      - name: Attach this build to the draft
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName > release.json
+          python3 scripts/release_assets.py check-draft extension.toml "$GITHUB_REF_NAME" < release.json
+          gh release upload "$GITHUB_REF_NAME" "$ID-$VERSION-$PLATFORM.tar.gz" --repo "$GITHUB_REPOSITORY" --clobber
+
+  release:
+    needs: [prepare, build]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Publish only the complete draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,tagName,assets > release.json
+          python3 scripts/release_assets.py check-assets extension.toml "$GITHUB_REF_NAME" < release.json
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
