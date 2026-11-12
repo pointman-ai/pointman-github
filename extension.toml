@@ -51,7 +51,7 @@ description = "GitHub's CLI, when it isn't on the node's PATH or in /opt/homebre
 [settings.properties.coauthors]
 type = "object"
 default = {}
-description = "People credited on the commits agents make in a chat with them, by Pointman handle: {\"james\": \"James Briggs <35938317+jamescalam@users.noreply.github.com>\"}. The person is the commit's author, Pointman App its committer, and Pointman (noreply@pointman.ai) its Co-authored-by. Left empty, this machine's own GitHub account (its gh login) is credited on every agent's commit; once anyone is in it, a person who isn't stays App-only."
+description = "People credited on the commits agents make in a chat with them, by Pointman handle: {\"james\": \"James Briggs <35938317+jamescalam@users.noreply.github.com>\"}. The person is the commit's author, Pointman App its committer, and Pointman (noreply@pointman.ai) its Co-authored-by. A person who starts a run and isn't in it stays App-only, never someone else; runs no person started follow default_author."
 
 [settings.properties.coauthors.additionalProperties]
 type = "string"

@@ -6,8 +6,9 @@ description: Writing on GitHub (pull requests, issues, comments, reviews, commit
 # Writing on GitHub as Pointman App
 
 Your commits are credited to a person, with Pointman and your client (Claude, for example) as co-authors:
-the person whose post started the run, else the machine's person (its own GitHub account, or a configured
-`default_author`), including after agent handoffs and timer wakes. PRs themselves still have the App as
+the person whose post started the run, when the extension's `coauthors` names them; in runs no person
+started (agent handoffs, timer wakes), the machine's person (its own GitHub account, or a configured
+`default_author`). Anyone else's commits stay the App's. PRs themselves still have the App as
 their single creator.
 
 In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The exception is a commit someone is credited on (above): it is authored as that person, with the App as committer and `Co-authored-by` lines for Pointman and your client, added by the `git` the extension gives you. Don't write those lines or set the author yourself. The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
