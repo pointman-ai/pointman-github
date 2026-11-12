@@ -102,9 +102,49 @@ fn write_shim(h: &Handle) -> anyhow::Result<()> {
         cli(h).as_deref(),
         &h.settings()["coauthors"],
         h.settings()["default_author"].as_str().unwrap_or_default(),
+        &h.settings()["client_coauthors"],
     )
     .context("couldn't write the runs' gh")?;
     Ok(())
+}
+
+/// How often this machine's own GitHub account is asked for again (`keep_machine_author`).
+const MACHINE_AUTHOR_EVERY: Duration = Duration::from_secs(3600);
+
+/// This machine's own GitHub account, for the runs' git to credit when nothing is configured (app::coauthor): asked
+/// of this machine's own `gh` login (`gh api user`, never with the App's token) when `asked` is over an hour ago. A
+/// machine with no login keeps none, so its agents' commits stay the App's.
+fn keep_machine_author(h: &Handle, asked: &mut Option<Instant>) {
+    if asked.is_some_and(|at| at.elapsed() < MACHINE_AUTHOR_EVERY) {
+        return;
+    }
+    *asked = Some(Instant::now());
+    let Some(gh) = cli(h) else { return };
+    let out = std::process::Command::new(gh)
+        .args(["api", "user"])
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_ENTERPRISE_TOKEN")
+        .env_remove("GITHUB_ENTERPRISE_TOKEN")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let user = match out {
+        Ok(o) if o.status.success() => serde_json::from_slice::<Value>(&o.stdout).unwrap_or(Value::Null),
+        Ok(o) => {
+            let why = String::from_utf8_lossy(&o.stderr);
+            h.log(format!("this machine's own gh login isn't known (gh api user: {})", why.trim()));
+            return;
+        }
+        Err(e) => return h.log(format!("couldn't ask gh for this machine's own login: {e}")),
+    };
+    match app::machine_author(&user) {
+        Some(who) => {
+            if let Err(e) = app::write_machine_author(&state(h), &who) {
+                h.log(format!("couldn't keep this machine's own GitHub account: {e:#}"));
+            }
+        }
+        None => h.log("gh api user gave no login and id for this machine's own account".to_string()),
+    }
 }
 
 /// What the board said, for runs to read: its App and where it's installed, and a fresh token for each of those.
@@ -200,10 +240,12 @@ fn main() -> anyhow::Result<()> {
         }
         // the runs' gh, and what the board says about Pointman App with its tokens, kept fresh for runs (MB-707)
         let (h, b) = (h.clone(), b.clone());
+        let mut asked = None;
         std::thread::spawn(move || loop {
             if let Err(e) = write_shim(&h) {
                 h.log(format!("{e:#}"));
             }
+            keep_machine_author(&h, &mut asked);
             if let Some(said) = check_app(&h, &b, false) {
                 keep_tokens(&h, said.as_ref());
             }

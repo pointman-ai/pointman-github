@@ -5,11 +5,12 @@ description: Writing on GitHub (pull requests, issues, comments, reviews, commit
 
 # Writing on GitHub as Pointman App
 
-The extension may also have a `default_author` configured for automatic runs: their commits credit
-that person with Pointman as co-author, including after agent handoffs and timer wakes. A directly
-named person takes precedence. PRs themselves still have the App as their single creator.
+Your commits are credited to a person, with Pointman and your client (Claude, for example) as co-authors:
+the person whose post started the run, else the machine's person (its own GitHub account, or a configured
+`default_author`), including after agent handoffs and timer wakes. PRs themselves still have the App as
+their single creator.
 
-In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The exception is a commit in a run a person started, or one with a configured default_author: it is authored as that person, with the App as committer and `Co-authored-by: Pointman`, added by the `git` the extension gives you. Don't write that line or set the author yourself. The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
+In your runs, `gh` and git act on GitHub as **Pointman App**: PRs, issues, comments, reviews, pushes and commits all show as the App's bot (`<its name>[bot]`). The exception is a commit someone is credited on (above): it is authored as that person, with the App as committer and `Co-authored-by` lines for Pointman and your client, added by the `git` the extension gives you. Don't write those lines or set the author yourself. The extension gives each command a short-lived token for the repo's owner, so you never sign in, set a token, or change git's name and email.
 
 Where the App can't act (it isn't installed on the repo's account, or GitHub refuses it), `gh` and git use this machine's own `gh` login instead, and say so in a line starting `github:`. What you do then shows on GitHub as that login's person, not the bot.
 
