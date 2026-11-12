@@ -470,7 +470,7 @@ fn coauthor(state: &Path, person: &str) -> Option<String> {
         let who = v.get(handle)?.as_str()?.trim();
         (!handle.is_empty() && split_identity(who).is_some() && !who.contains('\n')).then(|| who.to_string())
     };
-    let nobody_mapped = v.as_object().map_or(true, |m| m.is_empty());
+    let nobody_mapped = v.as_object().is_none_or(|m| m.is_empty());
     let machine = || identity_in(&machine_author_file(state));
     if person.is_empty() {
         let default = std::fs::read_to_string(shim_dir(state).join("default-author")).unwrap_or_default();
