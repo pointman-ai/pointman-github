@@ -388,20 +388,22 @@ fn write_script(dir: &Path, name: &str, text: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Writes the runs' `gh` and `git` (see `shim` and `git_shim`), the people who are credited on their commits, and
-/// where GitHub's CLI is.
+/// Writes the runs' `gh` and `git` (see `shim` and `git_shim`), the people and clients who are credited on their
+/// commits, and where GitHub's CLI is.
 pub fn write_shim(
     exe: &Path,
     state: &Path,
     gh: Option<&Path>,
     coauthors: &serde_json::Value,
     default_author: &str,
+    client_coauthors: &serde_json::Value,
 ) -> anyhow::Result<PathBuf> {
     let dir = shim_dir(state);
     std::fs::create_dir_all(&dir)?;
     write_script(&dir, "git", &git_shim(exe, state))?;
     write_script(&dir, "coauthors.json", &coauthors.to_string())?;
     write_script(&dir, "default-author", default_author)?;
+    write_script(&dir, "client-coauthors.json", &client_coauthors.to_string())?;
     match gh {
         Some(gh) => {
             write_script(&state.join("app"), "cli", &gh.display().to_string())?;
@@ -422,21 +424,125 @@ pub fn git_shim(exe: &Path, state: &Path) -> String {
     )
 }
 
-/// `Name <email>` for a person's handle, as the extension's `coauthors` setting names them.
+/// `default_author`'s value that keeps commits in runs no person started the App's alone.
+pub const APP_ONLY_AUTHOR: &str = "app";
+
+/// Where this machine's own GitHub account is kept, as `Name <id+login@users.noreply.github.com>` (`machine_author`).
+pub fn machine_author_file(state: &Path) -> PathBuf {
+    shim_dir(state).join("machine-author")
+}
+
+/// This machine's own GitHub account as a commit's author: `gh api user`'s name (else login), with GitHub's
+/// noreply address for it, so the commit shows on that account without its real email.
+pub fn machine_author(user: &serde_json::Value) -> Option<String> {
+    let login = user["login"].as_str()?.trim();
+    let id = user["id"].as_u64()?;
+    let name = user["name"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(login);
+    let ok = |s: &str| !s.is_empty() && !s.contains(['\n', '<', '>']);
+    (ok(login) && ok(name)).then(|| format!("{name} <{id}+{login}@users.noreply.github.com>"))
+}
+
+/// How long a kept machine account is believed (`refresh_machine_author` keeps it fresh well within this): past it, a
+/// machine whose extension stopped asking credits no one, rather than whoever was signed in last.
+pub const MACHINE_AUTHOR_FOR: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// Asks this machine's own `gh` login who it is (`gh api user`, with no token from the environment, so never the
+/// App's) and keeps the answer where the runs' git reads it (`machine_author_file`). Anything else (no `gh`, signed
+/// out, an error, a reply that isn't one account) removes what was kept, so an account that can't be verified is
+/// never credited; the error says why.
+pub fn refresh_machine_author(state: &Path, gh: Option<&Path>) -> anyhow::Result<String> {
+    match ask_machine_author(gh) {
+        Ok(who) => keep_machine_author(state, &who).map(|()| who),
+        Err(e) => match forget_machine_author(state) {
+            Ok(()) => Err(e),
+            Err(rm) => Err(e.context(format!("and the account kept before couldn't be removed: {rm:#}"))),
+        },
+    }
+}
+
+fn ask_machine_author(gh: Option<&Path>) -> anyhow::Result<String> {
+    let gh = gh.context("there's no gh on this machine")?;
+    let out = Command::new(gh)
+        .args(["api", "user"])
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_ENTERPRISE_TOKEN")
+        .env_remove("GITHUB_ENTERPRISE_TOKEN")
+        .stdin(Stdio::null())
+        .output()
+        .context("couldn't run gh api user")?;
+    if !out.status.success() {
+        anyhow::bail!("gh api user: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let user: Value = serde_json::from_slice(&out.stdout).context("gh api user's answer isn't JSON")?;
+    machine_author(&user).context("gh api user's answer has no usable login and id")
+}
+
+/// Keeps `who` in `machine_author_file`, written every time so its age says when it was last verified.
+fn keep_machine_author(state: &Path, who: &str) -> anyhow::Result<()> {
+    let dir = shim_dir(state);
+    std::fs::create_dir_all(&dir)?;
+    let mut f = tempfile::NamedTempFile::new_in(&dir)?;
+    f.write_all(who.as_bytes())?;
+    f.persist(machine_author_file(state))?;
+    Ok(())
+}
+
+fn forget_machine_author(state: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(machine_author_file(state)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// This machine's own GitHub account, when one was verified less than `MACHINE_AUTHOR_FOR` ago.
+fn machine_identity(state: &Path) -> Option<String> {
+    let path = machine_author_file(state);
+    // a time in the future (a clock moved back) isn't a recent check either
+    let age = std::fs::metadata(&path).ok()?.modified().ok()?.elapsed().ok()?;
+    if age >= MACHINE_AUTHOR_FOR {
+        return None;
+    }
+    let who = std::fs::read_to_string(&path).ok()?;
+    let who = who.trim();
+    (split_identity(who).is_some() && !who.contains('\n')).then(|| who.to_string())
+}
+
+/// `Name <email>` for the person credited on a commit in this run (`person`: whose post started it, "" for none):
+/// - a person: their entry in the `coauthors` setting, else no one, so the commit stays the App's. An unmapped
+///   person never becomes someone else, the machine's person included;
+/// - a run no person started (an agent's mention, a timer, a workflow): `default_author`'s entry in `coauthors` when
+///   it names a handle, no one for `app`, else this machine's own GitHub account (`machine_identity`).
+///
+/// It fails closed: an unreadable or malformed `coauthors` or `default_author`, or an entry that isn't one
+/// `Name <email>`, credits no one.
 fn coauthor(state: &Path, person: &str) -> Option<String> {
-    // Only an automatic run may use the configured fallback. An unmapped person must never
-    // silently become someone else.
-    let fallback;
-    let person = if person.is_empty() {
-        fallback = std::fs::read_to_string(shim_dir(state).join("default-author")).ok()?;
-        fallback.trim()
-    } else {
-        person
-    };
     let text = std::fs::read_to_string(shim_dir(state).join("coauthors.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let people = v.as_object()?;
+    let mapped = |handle: &str| {
+        let who = people.get(handle)?.as_str()?.trim();
+        (!handle.is_empty() && split_identity(who).is_some() && !who.contains('\n')).then(|| who.to_string())
+    };
+    if !person.is_empty() {
+        return mapped(person);
+    }
+    let default = std::fs::read_to_string(shim_dir(state).join("default-author")).ok()?;
+    match default.trim() {
+        "" => machine_identity(state),
+        APP_ONLY_AUTHOR => None,
+        handle => mapped(handle),
+    }
+}
+
+/// `Name <email>` for the client a run uses (`MB_RUN_CLIENT`: claude, codex…), as the `client_coauthors` setting
+/// names it; none for a client it doesn't name.
+pub fn client_coauthor(state: &Path, client: &str) -> Option<String> {
+    let client = client.trim();
+    let text = std::fs::read_to_string(shim_dir(state).join("client-coauthors.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let who = v.get(person)?.as_str()?.trim();
-    (!person.is_empty() && !who.is_empty() && !who.contains('\n')).then(|| who.to_string())
+    let who = v.get(client)?.as_str()?.trim();
+    (!client.is_empty() && split_identity(who).is_some() && !who.contains('\n')).then(|| who.to_string())
 }
 
 /// Where git's subcommand is in its arguments, past the options that come before it.
@@ -469,15 +575,20 @@ pub fn talks_to_github(args: &[String]) -> bool {
 /// (the App's bot email shows as `pointman-app[bot]`), so this email is one no account has, and GitHub shows the name.
 pub const COAUTHOR: &str = "Pointman <noreply@pointman.ai>";
 
-/// git's arguments with Pointman credited as co-author (`COAUTHOR`), when this is a `commit` with a directly named person
-/// or an explicitly configured default author, they have an entry (they become the author, see `git_command`) and the App commits (`bot`); else the
-/// arguments as they are.
-pub fn git_args(state: &Path, person: &str, bot: &str, args: &[String]) -> Vec<String> {
+/// git's arguments with Pointman credited as co-author (`COAUTHOR`), and after it the run's client (`client`, from
+/// `client_coauthor`), when this is a `commit` someone is credited on (`coauthor`: they become the author, see
+/// `git_command`) and the App commits (`bot`); else the arguments as they are.
+pub fn git_args(state: &Path, person: &str, client: Option<&str>, bot: &str, args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
     if let (Some(at), Some(_), false) = (commit_at(args), coauthor(state, person), bot.is_empty()) {
-        let trailer = format!("Co-authored-by: {COAUTHOR}");
-        if !args[at..].iter().any(|a| a == &format!("--trailer={trailer}")) {
-            out.splice(at + 1..at + 1, ["--trailer".to_string(), trailer]);
+        let trailers: Vec<String> =
+            std::iter::once(COAUTHOR).chain(client).map(|who| format!("Co-authored-by: {who}")).collect();
+        let mut place = at + 1;
+        for trailer in trailers {
+            if !args[at..].iter().any(|a| a == &format!("--trailer={trailer}")) {
+                out.splice(place..place, ["--trailer".to_string(), trailer]);
+                place += 2;
+            }
         }
     }
     out
@@ -520,7 +631,12 @@ pub fn git_command(state: &Path, args: &[String], login: Login) -> anyhow::Resul
         (Ok(n), Ok(e)) if !n.is_empty() && !e.is_empty() => format!("{n} <{e}>"),
         _ => String::new(),
     };
-    let args = person.as_deref().map(|person| git_args(state, person, &bot, args)).unwrap_or_else(|| args.to_vec());
+    // the run's client as a co-author too, when the node says which it is (MB_RUN_CLIENT) and it's named
+    let client = std::env::var("MB_RUN_CLIENT").ok().and_then(|c| client_coauthor(state, &c));
+    let args = person
+        .as_deref()
+        .map(|person| git_args(state, person, client.as_deref(), &bot, args))
+        .unwrap_or_else(|| args.to_vec());
     let exe = std::env::current_exe().context("where this extension's binary is")?;
     let mut cmd = Command::new(git);
     if let (Some(at), Some(who)) = (commit_at(&args), person.as_deref().and_then(|p| coauthor(state, p))) {
@@ -810,11 +926,12 @@ mod tests {
         let who = "James <1+jamescalam@users.noreply.github.com>";
         let dir = state_with(json!({"james": who}));
         let bot = "pointman-app[bot] <1+pointman-app[bot]@users.noreply.github.com>";
-        let got = git_args(dir.path(), "james", bot, &args("-C /r commit -m hi"));
+        let got = git_args(dir.path(), "james", None, bot, &args("-C /r commit -m hi"));
         let trailer = "Co-authored-by: Pointman <noreply@pointman.ai>";
         assert_eq!(got, argv(&["-C", "/r", "commit", "--trailer", trailer, "-m", "hi"]));
         // asked again with the same trailer, it isn't added twice
-        let again = git_args(dir.path(), "james", bot, &argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
+        let again =
+            git_args(dir.path(), "james", None, bot, &argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
         assert_eq!(again, argv(&["commit", &format!("--trailer={trailer}"), "-m", "hi"]));
         assert_eq!(split_identity(who), Some(("James", "1+jamescalam@users.noreply.github.com")));
     }
@@ -825,10 +942,10 @@ mod tests {
         for (person, a) in
             [("", "commit -m x"), ("scene", "commit -m x"), ("james", "push origin main"), ("james", "log commit")]
         {
-            assert_eq!(git_args(dir.path(), person, "bot <b@x>", &args(a)), args(a), "{person} {a}");
+            assert_eq!(git_args(dir.path(), person, None, "bot <b@x>", &args(a)), args(a), "{person} {a}");
         }
         let none = tempfile::tempdir().unwrap();
-        assert_eq!(git_args(none.path(), "james", "bot <b@x>", &args("commit -m x")), args("commit -m x"));
+        assert_eq!(git_args(none.path(), "james", None, "bot <b@x>", &args("commit -m x")), args("commit -m x"));
     }
 
     #[test]
@@ -838,19 +955,169 @@ mod tests {
         let dir = state_with(json!({"james": who, "sam": other}));
         let file = shim_dir(dir.path()).join("default-author");
         let command = args("commit -m continued");
-        assert_eq!(git_args(dir.path(), "", "bot <b@x>", &command), command);
+        assert_eq!(git_args(dir.path(), "", None, "bot <b@x>", &command), command);
         std::fs::write(&file, "james").unwrap();
         assert_eq!(coauthor(dir.path(), "").as_deref(), Some(who));
         assert_eq!(coauthor(dir.path(), "sam").as_deref(), Some(other));
         assert_eq!(coauthor(dir.path(), "unknown"), None);
-        assert!(git_args(dir.path(), "", "bot <b@x>", &command).contains(&format!("Co-authored-by: {COAUTHOR}")));
-        assert_eq!(git_args(dir.path(), "unknown", "bot <b@x>", &command), command);
-        assert_eq!(git_args(dir.path(), "", "", &command), command);
-        assert_eq!(git_args(dir.path(), "", "bot <b@x>", &args("push origin main")), args("push origin main"));
+        assert!(git_args(dir.path(), "", None, "bot <b@x>", &command).contains(&format!("Co-authored-by: {COAUTHOR}")));
+        assert_eq!(git_args(dir.path(), "unknown", None, "bot <b@x>", &command), command);
+        assert_eq!(git_args(dir.path(), "", None, "", &command), command);
+        assert_eq!(git_args(dir.path(), "", None, "bot <b@x>", &args("push origin main")), args("push origin main"));
         std::fs::write(&file, "unknown").unwrap();
         assert_eq!(coauthor(dir.path(), ""), None);
         std::fs::write(&file, "").unwrap();
+        assert_eq!(coauthor(dir.path(), ""), None, "no machine account known");
+    }
+
+    /// The runs' folder as write_shim leaves it: `coauthors.json` and `default-author` as given (None: no file), and
+    /// this machine's own account when one was verified.
+    fn state_of(coauthors: Option<&str>, default: Option<&str>, machine: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let shims = shim_dir(dir.path());
+        std::fs::create_dir_all(&shims).unwrap();
+        for (name, text) in [("coauthors.json", coauthors), ("default-author", default)] {
+            if let Some(text) = text {
+                std::fs::write(shims.join(name), text).unwrap();
+            }
+        }
+        if let Some(who) = machine {
+            keep_machine_author(dir.path(), who).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn with_nothing_configured_the_machines_own_account_is_the_author() {
+        let me = "James Briggs <35938317+jamescalam@users.noreply.github.com>";
+        let user = json!({"login": "jamescalam", "id": 35938317, "name": "James Briggs"});
+        assert_eq!(machine_author(&user).as_deref(), Some(me));
+        assert_eq!(
+            machine_author(&json!({"login": "sam", "id": 2, "name": null})).as_deref(),
+            Some("sam <2+sam@users.noreply.github.com>")
+        );
+        assert_eq!(machine_author(&json!({"login": "x<y", "id": 3})), None);
+        assert_eq!(machine_author(&json!({"message": "Bad credentials"})), None);
+
+        let sam = "Sam <2+s@users.noreply.github.com>";
+        let with_sam = json!({"sam": sam}).to_string();
+        let bad_sam = json!({"sam": "no email"}).to_string();
+        // (coauthors.json, default-author, machine account) → (no person, "james", "sam")
+        type Row<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, [Option<&'a str>; 3]);
+        #[rustfmt::skip]
+        let rows: [Row; 13] = [
+            // nothing configured: runs no person started credit the machine's account; a person's run that
+            // isn't mapped stays the App's, the machine's person included (EXT-148)
+            (Some("{}"), Some(""), Some(me), [Some(me), None, None]),
+            // the machine's account unknown (no gh, signed out): no one
+            (Some("{}"), Some(""), None, [None, None, None]),
+            // `app`: runs no person started are the App's
+            (Some("{}"), Some(APP_ONLY_AUTHOR), Some(me), [None, None, None]),
+            // someone mapped: they're credited in their own runs, an unmapped person never becomes anyone
+            (Some(&with_sam), Some(""), Some(me), [Some(me), None, Some(sam)]),
+            (Some(&with_sam), Some("sam"), Some(me), [Some(sam), None, Some(sam)]),
+            // default_author names someone not mapped: no one, not the machine's account
+            (Some(&with_sam), Some("james"), Some(me), [None, None, Some(sam)]),
+            // a mapping that isn't one `Name <email>`: no one, not the machine's account
+            (Some(&bad_sam), Some(""), Some(me), [Some(me), None, None]),
+            (Some(&bad_sam), Some("sam"), Some(me), [None, None, None]),
+            // coauthors missing or malformed: fail closed, everywhere
+            (None, Some(""), Some(me), [None, None, None]),
+            (Some("not json"), Some(""), Some(me), [None, None, None]),
+            (Some("null"), Some(""), Some(me), [None, None, None]),
+            (Some(r#"["sam"]"#), Some(""), Some(me), [None, None, None]),
+            // default-author missing: fail closed for runs no person started
+            (Some(&with_sam), None, Some(me), [None, None, Some(sam)]),
+        ];
+        for (coauthors, default, machine, want) in rows {
+            let dir = state_of(coauthors, default, machine);
+            for (person, want) in ["", "james", "sam"].into_iter().zip(want) {
+                let row = format!("{coauthors:?} {default:?} {machine:?}, person {person:?}");
+                assert_eq!(coauthor(dir.path(), person).as_deref(), want, "{row}");
+                // and the commit's trailer only when someone is credited
+                let command = args("commit -m x");
+                let got = git_args(dir.path(), person, None, "bot <b@x>", &command);
+                assert_eq!(got != command, want.is_some(), "{row}");
+            }
+        }
+        // a machine file that isn't one identity is no one
+        let dir = state_of(Some("{}"), Some(""), Some("not an identity"));
         assert_eq!(coauthor(dir.path(), ""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_machines_account_is_forgotten_once_it_cant_be_verified() {
+        use std::os::unix::fs::PermissionsExt;
+        let me = "James Briggs <35938317+jamescalam@users.noreply.github.com>";
+        let dir = state_of(Some("{}"), Some(""), None);
+        let gh = dir.path().join("gh");
+        let answer = |script: &str| {
+            std::fs::write(&gh, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let signed_in = r#"echo '{"login": "jamescalam", "id": 35938317, "name": "James Briggs"}'"#;
+        // each failure after a success: the account kept before is gone, and no one is credited
+        for (why, fails) in [
+            ("signed out", "echo 'You are not logged into any GitHub hosts.' >&2; exit 4"),
+            ("an error", "echo 'HTTP 403: API rate limit exceeded' >&2; exit 1"),
+            ("not JSON", "echo '<html>'"),
+            ("no login", r#"echo '{"message": "Bad credentials"}'"#),
+            ("a login that isn't one", r#"echo '{"login": "x>y", "id": 3}'"#),
+        ] {
+            answer(signed_in);
+            assert_eq!(refresh_machine_author(dir.path(), Some(&gh)).unwrap(), me, "{why}");
+            assert_eq!(coauthor(dir.path(), "").as_deref(), Some(me), "{why}");
+            answer(fails);
+            assert!(refresh_machine_author(dir.path(), Some(&gh)).is_err(), "{why}");
+            assert!(!machine_author_file(dir.path()).exists(), "{why}");
+            assert_eq!(coauthor(dir.path(), ""), None, "{why}");
+        }
+        // no gh at all, and a gh that isn't there
+        answer(signed_in);
+        refresh_machine_author(dir.path(), Some(&gh)).unwrap();
+        assert!(refresh_machine_author(dir.path(), None).is_err());
+        assert_eq!(coauthor(dir.path(), ""), None);
+        refresh_machine_author(dir.path(), Some(&gh)).unwrap();
+        assert!(refresh_machine_author(dir.path(), Some(&dir.path().join("missing"))).is_err());
+        assert_eq!(coauthor(dir.path(), ""), None);
+        // one kept longer than MACHINE_AUTHOR_FOR without being verified again (the extension stopped asking, the
+        // machine restarted): no one
+        refresh_machine_author(dir.path(), Some(&gh)).unwrap();
+        assert_eq!(coauthor(dir.path(), "").as_deref(), Some(me));
+        let old = SystemTime::now() - MACHINE_AUTHOR_FOR - std::time::Duration::from_secs(1);
+        std::fs::File::options().write(true).open(machine_author_file(dir.path())).unwrap().set_modified(old).unwrap();
+        assert_eq!(coauthor(dir.path(), ""), None);
+        // and a fresh check believes it again
+        refresh_machine_author(dir.path(), Some(&gh)).unwrap();
+        assert_eq!(coauthor(dir.path(), "").as_deref(), Some(me));
+    }
+
+    #[test]
+    fn the_runs_client_is_a_co_author_after_pointman() {
+        let who = "James <1+j@users.noreply.github.com>";
+        let dir = state_with(json!({"james": who}));
+        let clients = json!({"claude": "Claude <noreply@anthropic.com>", "bad": "no email"});
+        std::fs::write(shim_dir(dir.path()).join("client-coauthors.json"), clients.to_string()).unwrap();
+        let claude = client_coauthor(dir.path(), "claude");
+        assert_eq!(claude.as_deref(), Some("Claude <noreply@anthropic.com>"));
+        assert_eq!(client_coauthor(dir.path(), "codex"), None);
+        assert_eq!(client_coauthor(dir.path(), "bad"), None);
+        assert_eq!(client_coauthor(dir.path(), ""), None);
+        let ours = "Co-authored-by: Pointman <noreply@pointman.ai>";
+        let theirs = "Co-authored-by: Claude <noreply@anthropic.com>";
+        let got = git_args(dir.path(), "james", claude.as_deref(), "bot <b@x>", &args("commit -m hi"));
+        assert_eq!(got, argv(&["commit", "--trailer", ours, "--trailer", theirs, "-m", "hi"]));
+        // neither twice, and nothing on a commit nobody is credited on
+        let again = argv(&["commit", &format!("--trailer={theirs}"), "-m", "hi"]);
+        let got = git_args(dir.path(), "james", claude.as_deref(), "bot <b@x>", &again);
+        assert_eq!(got, argv(&["commit", "--trailer", ours, &format!("--trailer={theirs}"), "-m", "hi"]));
+        assert_eq!(
+            git_args(dir.path(), "scene", claude.as_deref(), "bot <b@x>", &args("commit -m x")),
+            args("commit -m x")
+        );
+        // and no client file at all: the client is no one
+        assert_eq!(client_coauthor(tempfile::tempdir().unwrap().path(), "claude"), None);
     }
 
     fn args(s: &str) -> Vec<String> {
@@ -1171,9 +1438,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gh = dir.path().join("gh");
         std::fs::write(&gh, "").unwrap();
-        write_shim(Path::new("/e/github"), dir.path(), Some(&gh), &json!({}), "").unwrap();
+        write_shim(Path::new("/e/github"), dir.path(), Some(&gh), &json!({}), "", &json!({})).unwrap();
         assert_eq!(machine_cli(dir.path()), Some(gh));
-        write_shim(Path::new("/e/github"), dir.path(), None, &json!({}), "").unwrap();
+        write_shim(Path::new("/e/github"), dir.path(), None, &json!({}), "", &json!({})).unwrap();
         assert_eq!(machine_cli(dir.path()), None);
     }
 

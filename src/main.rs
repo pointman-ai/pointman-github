@@ -102,9 +102,33 @@ fn write_shim(h: &Handle) -> anyhow::Result<()> {
         cli(h).as_deref(),
         &h.settings()["coauthors"],
         h.settings()["default_author"].as_str().unwrap_or_default(),
+        &h.settings()["client_coauthors"],
     )
     .context("couldn't write the runs' gh")?;
     Ok(())
+}
+
+/// How often this machine's own GitHub account is asked for again (`keep_machine_author`), well within
+/// app::MACHINE_AUTHOR_FOR, the time after which an account that wasn't asked for again credits no one.
+const MACHINE_AUTHOR_EVERY: Duration = Duration::from_secs(300);
+
+/// This machine's own GitHub account, for the runs' git to credit in runs no person started (app::coauthor): asked of
+/// this machine's own `gh` login when `asked` is over MACHINE_AUTHOR_EVERY ago. One that can't be verified now (signed
+/// out, an error) is removed, so its agents' commits stay the App's until it can be.
+fn keep_machine_author(h: &Handle, asked: &mut Option<Instant>, had: &mut Option<bool>) {
+    if asked.is_some_and(|at| at.elapsed() < MACHINE_AUTHOR_EVERY) {
+        return;
+    }
+    *asked = Some(Instant::now());
+    let got = app::refresh_machine_author(&state(h), cli(h).as_deref());
+    // said once each time it changes, not every few minutes
+    if *had != Some(got.is_ok()) {
+        match &got {
+            Ok(who) => h.log(format!("commits in runs no person started credit this machine's own account, {who}")),
+            Err(e) => h.log(format!("this machine's own GitHub account isn't known, so no one is credited: {e:#}")),
+        }
+    }
+    *had = Some(got.is_ok());
 }
 
 /// What the board said, for runs to read: its App and where it's installed, and a fresh token for each of those.
@@ -200,10 +224,12 @@ fn main() -> anyhow::Result<()> {
         }
         // the runs' gh, and what the board says about Pointman App with its tokens, kept fresh for runs (MB-707)
         let (h, b) = (h.clone(), b.clone());
+        let (mut asked, mut had) = (None, None);
         std::thread::spawn(move || loop {
             if let Err(e) = write_shim(&h) {
                 h.log(format!("{e:#}"));
             }
+            keep_machine_author(&h, &mut asked, &mut had);
             if let Some(said) = check_app(&h, &b, false) {
                 keep_tokens(&h, said.as_ref());
             }

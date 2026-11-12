@@ -5,7 +5,7 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.13.1"
+version = "0.14.0"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App, else as the machine's gh login."
 node = ">=0.4.4"
@@ -51,7 +51,7 @@ description = "GitHub's CLI, when it isn't on the node's PATH or in /opt/homebre
 [settings.properties.coauthors]
 type = "object"
 default = {}
-description = "People credited on the commits agents make in a chat with them, by Pointman handle: {\"james\": \"James Briggs <35938317+jamescalam@users.noreply.github.com>\"}. The person is the commit's author, Pointman App its committer, and Pointman (noreply@pointman.ai) its Co-authored-by. Runs no person started stay App-only unless default_author is configured."
+description = "People credited on the commits agents make in a chat with them, by Pointman handle: {\"james\": \"James Briggs <35938317+jamescalam@users.noreply.github.com>\"}. The person is the commit's author, Pointman App its committer, and Pointman (noreply@pointman.ai) its Co-authored-by. A person who starts a run and isn't in it stays App-only, never someone else; runs no person started follow default_author."
 
 [settings.properties.coauthors.additionalProperties]
 type = "string"
@@ -59,4 +59,12 @@ type = "string"
 [settings.properties.default_author]
 type = "string"
 default = ""
-description = "Pointman handle from coauthors to credit on commits in automatic runs too (for example james). Empty keeps automatic commits App-only. A person who directly starts a run takes precedence; an unmapped person stays App-only. PRs are still opened by the App."
+description = "Who is credited on commits in runs no person started (an agent's mention, a timer, a workflow): a Pointman handle from coauthors (for example james), app for no one (App-only), or empty for this machine's own GitHub account (its gh login). A person who directly starts a run takes precedence. PRs are still opened by the App."
+
+[settings.properties.client_coauthors]
+type = "object"
+default = { claude = "Claude <noreply@anthropic.com>" }
+description = "The agent's client credited as a co-author after Pointman, by the client's name (claude, codex, gemini…), on the commits a person is credited on. A client not in it gets no line."
+
+[settings.properties.client_coauthors.additionalProperties]
+type = "string"

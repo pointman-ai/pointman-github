@@ -128,7 +128,8 @@ fn configured_author_survives_automatic_wakes_but_never_replaces_another_person(
     let node = StandIn::new(env!("CARGO_MANIFEST_DIR"))
         .binary(env!("CARGO_BIN_EXE_github"))
         .settings(json!({"cli": fake_gh().to_string_lossy(), "default_author": "james",
-            "coauthors": {"james": "James <j@example.com>", "sam": "Sam <s@example.com>"}}))
+            "coauthors": {"james": "James <j@example.com>", "sam": "Sam <s@example.com>"},
+            "client_coauthors": {"claude": "Claude <noreply@anthropic.com>"}}))
         .method("core.call", board)
         .start()
         .unwrap();
@@ -145,6 +146,7 @@ fn configured_author_survives_automatic_wakes_but_never_replaces_another_person(
         command
             .env("PATH", std::env::join_paths([shims.as_path(), dir.path(), std::path::Path::new("/bin")]).unwrap())
             .env("MB_RUN_PERSON", person)
+            .env("MB_RUN_CLIENT", "claude")
             .env_remove("MB_RUN_PERSON_FILE");
         if let Some(file) = file {
             command.env("MB_RUN_PERSON_FILE", file);
@@ -160,6 +162,8 @@ fn configured_author_survives_automatic_wakes_but_never_replaces_another_person(
         assert!(output.contains("author:James <j@example.com>"), "{output}");
         assert!(output.contains("committer:pointman-app[bot]"), "{output}");
         assert!(output.contains("arg:Co-authored-by: Pointman <noreply@pointman.ai>"), "{output}");
+        // the run's client after Pointman (EXT-148)
+        assert!(output.contains("arg:Co-authored-by: Claude <noreply@anthropic.com>"), "{output}");
     }
     assert!(run("sam", None).contains("author:Sam <s@example.com>"));
     for output in [run("unknown", None), run("james", Some(&dir.path().join("missing")))] {

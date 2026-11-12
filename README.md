@@ -49,13 +49,23 @@ Pointman itself.
 |---|---|---|
 | `cli` | empty | GitHub's CLI, when it isn't on the node's PATH or in /opt/homebrew/bin or /usr/local/bin; empty, the extension installs its own |
 | `coauthors` | `{}` | Pointman handles mapped to `Name <email>` commit authors |
-| `default_author` | empty | A handle from `coauthors` to credit on automatic runs too |
+| `default_author` | empty | Who is credited in runs no person started: a handle from `coauthors`, `app` for no one, or empty for this machine's own GitHub account |
+| `client_coauthors` | `{claude = "Claude <noreply@anthropic.com>"}` | Agent clients (by name) credited as co-authors after Pointman |
 
-To keep an owner's commit credit through agent handoffs, CI reports and timer wakes, set
-`default_author = "james"` alongside their entry in `coauthors`. Commits then name that person as author,
-the App as committer, and `Pointman <noreply@pointman.ai>` as co-author. A person directly starting a run
-takes precedence; an unmapped person stays App-only. An unreadable run-person file also stays App-only.
-Leaving `default_author` empty keeps automatic runs App-only.
+In runs no person started (agent handoffs, CI reports, timer wakes), an agent's commit names an author from
+`default_author`: a handle from `coauthors`, `app` for App-only, or, left empty, this machine's own GitHub
+account (the account its `gh` is signed in to, as `Name <id+login@users.noreply.github.com>`, checked every
+5 minutes and never with the App's token). The App is the committer and `Pointman <noreply@pointman.ai>` the
+co-author. An account that can't be checked (signed out, an error) is dropped at once, and one not checked
+for 15 minutes isn't used, so those commits stay App-only.
+
+A person directly starting a run is credited only with an entry in `coauthors`; a person who isn't in it
+stays App-only, never someone else, the machine's own account included. An unreadable run-person file, an
+unreadable or malformed `coauthors`, or an entry that isn't one `Name <email>` also stays App-only.
+
+The run's client is a further co-author on those commits: the node names it in the run's `MB_RUN_CLIENT`
+(`claude`, `codex`…), and `client_coauthors` gives its `Name <email>`. A client that isn't listed gets no
+line. Agents never write these lines themselves.
 
 A pull request has one creator: the account whose token opens it. PRs opened with the App still show
 the App as creator; the author and co-author above appear on their commits. Existing commits are unchanged.
