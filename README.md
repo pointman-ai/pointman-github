@@ -50,7 +50,7 @@ Pointman itself.
 | `cli` | empty | GitHub's CLI, when it isn't on the node's PATH or in /opt/homebrew/bin or /usr/local/bin; empty, the extension installs its own |
 | `coauthors` | `{}` | Pointman handles mapped to `Name <email>` commit authors |
 | `default_author` | empty | Who is credited in runs no person started: a handle from `coauthors`, `app` for no one, or empty for this machine's own GitHub account |
-| `client_coauthors` | `{claude = "Claude <noreply@anthropic.com>"}` | Agent clients (by name) credited as co-authors after Pointman |
+| `harness_coauthors` | `{claude = "Claude <noreply@anthropic.com>"}` | Agent harnesses (by name) credited as co-authors after Pointman |
 
 In runs no person started (agent handoffs, CI reports, timer wakes), an agent's commit names an author from
 `default_author`: a handle from `coauthors`, `app` for App-only, or, left empty, this machine's own GitHub
@@ -63,8 +63,8 @@ A person directly starting a run is credited only with an entry in `coauthors`; 
 stays App-only, never someone else, the machine's own account included. An unreadable run-person file, an
 unreadable or malformed `coauthors`, or an entry that isn't one `Name <email>` also stays App-only.
 
-The run's client is a further co-author on those commits: the node names it in the run's `MB_RUN_CLIENT`
-(`claude`, `codex`…), and `client_coauthors` gives its `Name <email>`. A client that isn't listed gets no
+The run's harness is a further co-author on those commits: the node names it in the run's `MB_RUN_HARNESS`
+(`claude`, `codex`…), and `harness_coauthors` gives its `Name <email>`. A harness that isn't listed gets no
 line. Agents never write these lines themselves.
 
 A pull request has one creator: the account whose token opens it. PRs opened with the App still show

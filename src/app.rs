@@ -388,7 +388,7 @@ fn write_script(dir: &Path, name: &str, text: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Writes the runs' `gh` and `git` (see `shim` and `git_shim`), the people and clients who are credited on their
+/// Writes the runs' `gh` and `git` (see `shim` and `git_shim`), the people and harnesses who are credited on their
 /// commits, and where GitHub's CLI is.
 pub fn write_shim(
     exe: &Path,
@@ -396,14 +396,14 @@ pub fn write_shim(
     gh: Option<&Path>,
     coauthors: &serde_json::Value,
     default_author: &str,
-    client_coauthors: &serde_json::Value,
+    harness_coauthors: &serde_json::Value,
 ) -> anyhow::Result<PathBuf> {
     let dir = shim_dir(state);
     std::fs::create_dir_all(&dir)?;
     write_script(&dir, "git", &git_shim(exe, state))?;
     write_script(&dir, "coauthors.json", &coauthors.to_string())?;
     write_script(&dir, "default-author", default_author)?;
-    write_script(&dir, "client-coauthors.json", &client_coauthors.to_string())?;
+    write_script(&dir, "harness-coauthors.json", &harness_coauthors.to_string())?;
     match gh {
         Some(gh) => {
             write_script(&state.join("app"), "cli", &gh.display().to_string())?;
@@ -535,14 +535,14 @@ fn coauthor(state: &Path, person: &str) -> Option<String> {
     }
 }
 
-/// `Name <email>` for the client a run uses (`MB_RUN_CLIENT`: claude, codex…), as the `client_coauthors` setting
-/// names it; none for a client it doesn't name.
-pub fn client_coauthor(state: &Path, client: &str) -> Option<String> {
-    let client = client.trim();
-    let text = std::fs::read_to_string(shim_dir(state).join("client-coauthors.json")).ok()?;
+/// `Name <email>` for the harness a run uses (`MB_RUN_HARNESS`: claude, codex…), as the `harness_coauthors` setting
+/// names it; none for a harness it doesn't name.
+pub fn harness_coauthor(state: &Path, harness: &str) -> Option<String> {
+    let harness = harness.trim();
+    let text = std::fs::read_to_string(shim_dir(state).join("harness-coauthors.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let who = v.get(client)?.as_str()?.trim();
-    (!client.is_empty() && split_identity(who).is_some() && !who.contains('\n')).then(|| who.to_string())
+    let who = v.get(harness)?.as_str()?.trim();
+    (!harness.is_empty() && split_identity(who).is_some() && !who.contains('\n')).then(|| who.to_string())
 }
 
 /// Where git's subcommand is in its arguments, past the options that come before it.
@@ -575,14 +575,14 @@ pub fn talks_to_github(args: &[String]) -> bool {
 /// (the App's bot email shows as `pointman-app[bot]`), so this email is one no account has, and GitHub shows the name.
 pub const COAUTHOR: &str = "Pointman <noreply@pointman.ai>";
 
-/// git's arguments with Pointman credited as co-author (`COAUTHOR`), and after it the run's client (`client`, from
-/// `client_coauthor`), when this is a `commit` someone is credited on (`coauthor`: they become the author, see
+/// git's arguments with Pointman credited as co-author (`COAUTHOR`), and after it the run's harness (`harness`, from
+/// `harness_coauthor`), when this is a `commit` someone is credited on (`coauthor`: they become the author, see
 /// `git_command`) and the App commits (`bot`); else the arguments as they are.
-pub fn git_args(state: &Path, person: &str, client: Option<&str>, bot: &str, args: &[String]) -> Vec<String> {
+pub fn git_args(state: &Path, person: &str, harness: Option<&str>, bot: &str, args: &[String]) -> Vec<String> {
     let mut out = args.to_vec();
     if let (Some(at), Some(_), false) = (commit_at(args), coauthor(state, person), bot.is_empty()) {
         let trailers: Vec<String> =
-            std::iter::once(COAUTHOR).chain(client).map(|who| format!("Co-authored-by: {who}")).collect();
+            std::iter::once(COAUTHOR).chain(harness).map(|who| format!("Co-authored-by: {who}")).collect();
         let mut place = at + 1;
         for trailer in trailers {
             if !args[at..].iter().any(|a| a == &format!("--trailer={trailer}")) {
@@ -631,11 +631,11 @@ pub fn git_command(state: &Path, args: &[String], login: Login) -> anyhow::Resul
         (Ok(n), Ok(e)) if !n.is_empty() && !e.is_empty() => format!("{n} <{e}>"),
         _ => String::new(),
     };
-    // the run's client as a co-author too, when the node says which it is (MB_RUN_CLIENT) and it's named
-    let client = std::env::var("MB_RUN_CLIENT").ok().and_then(|c| client_coauthor(state, &c));
+    // the run's harness as a co-author too, when the node says which it is (MB_RUN_HARNESS) and it's named
+    let harness = std::env::var("MB_RUN_HARNESS").ok().and_then(|c| harness_coauthor(state, &c));
     let args = person
         .as_deref()
-        .map(|person| git_args(state, person, client.as_deref(), &bot, args))
+        .map(|person| git_args(state, person, harness.as_deref(), &bot, args))
         .unwrap_or_else(|| args.to_vec());
     let exe = std::env::current_exe().context("where this extension's binary is")?;
     let mut cmd = Command::new(git);
@@ -1094,16 +1094,16 @@ mod tests {
     }
 
     #[test]
-    fn the_runs_client_is_a_co_author_after_pointman() {
+    fn the_runs_harness_is_a_co_author_after_pointman() {
         let who = "James <1+j@users.noreply.github.com>";
         let dir = state_with(json!({"james": who}));
-        let clients = json!({"claude": "Claude <noreply@anthropic.com>", "bad": "no email"});
-        std::fs::write(shim_dir(dir.path()).join("client-coauthors.json"), clients.to_string()).unwrap();
-        let claude = client_coauthor(dir.path(), "claude");
+        let harnesses = json!({"claude": "Claude <noreply@anthropic.com>", "bad": "no email"});
+        std::fs::write(shim_dir(dir.path()).join("harness-coauthors.json"), harnesses.to_string()).unwrap();
+        let claude = harness_coauthor(dir.path(), "claude");
         assert_eq!(claude.as_deref(), Some("Claude <noreply@anthropic.com>"));
-        assert_eq!(client_coauthor(dir.path(), "codex"), None);
-        assert_eq!(client_coauthor(dir.path(), "bad"), None);
-        assert_eq!(client_coauthor(dir.path(), ""), None);
+        assert_eq!(harness_coauthor(dir.path(), "codex"), None);
+        assert_eq!(harness_coauthor(dir.path(), "bad"), None);
+        assert_eq!(harness_coauthor(dir.path(), ""), None);
         let ours = "Co-authored-by: Pointman <noreply@pointman.ai>";
         let theirs = "Co-authored-by: Claude <noreply@anthropic.com>";
         let got = git_args(dir.path(), "james", claude.as_deref(), "bot <b@x>", &args("commit -m hi"));
@@ -1116,8 +1116,8 @@ mod tests {
             git_args(dir.path(), "scene", claude.as_deref(), "bot <b@x>", &args("commit -m x")),
             args("commit -m x")
         );
-        // and no client file at all: the client is no one
-        assert_eq!(client_coauthor(tempfile::tempdir().unwrap().path(), "claude"), None);
+        // and no harness file at all: the harness is no one
+        assert_eq!(harness_coauthor(tempfile::tempdir().unwrap().path(), "claude"), None);
     }
 
     fn args(s: &str) -> Vec<String> {

@@ -66,7 +66,7 @@ fn before_the_board_has_the_app_runs_use_the_machines_own_login() {
     let state = node.state_dir_path().to_path_buf();
     settled(&state);
 
-    let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
+    let got = node.call("session.prepare", json!({"harness": "claude", "handle": {"handle": "scene"}})).unwrap();
     let env = &got["env"];
     assert!(env.get("GH_TOKEN").is_none(), "{got}");
     assert!(env.get("GIT_AUTHOR_NAME").is_none(), "{got}");
@@ -129,13 +129,13 @@ fn configured_author_survives_automatic_wakes_but_never_replaces_another_person(
         .binary(env!("CARGO_BIN_EXE_github"))
         .settings(json!({"cli": fake_gh().to_string_lossy(), "default_author": "james",
             "coauthors": {"james": "James <j@example.com>", "sam": "Sam <s@example.com>"},
-            "client_coauthors": {"claude": "Claude <noreply@anthropic.com>"}}))
+            "harness_coauthors": {"claude": "Claude <noreply@anthropic.com>"}}))
         .method("core.call", board)
         .start()
         .unwrap();
     let state = node.state_dir_path().to_path_buf();
     settled(&state);
-    let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
+    let got = node.call("session.prepare", json!({"harness": "claude", "handle": {"handle": "scene"}})).unwrap();
     let shims = state.join("app/bin");
     let person_file = dir.path().join("person");
     let run = |person: &str, file: Option<&std::path::Path>| {
@@ -146,7 +146,7 @@ fn configured_author_survives_automatic_wakes_but_never_replaces_another_person(
         command
             .env("PATH", std::env::join_paths([shims.as_path(), dir.path(), std::path::Path::new("/bin")]).unwrap())
             .env("MB_RUN_PERSON", person)
-            .env("MB_RUN_CLIENT", "claude")
+            .env("MB_RUN_HARNESS", "claude")
             .env_remove("MB_RUN_PERSON_FILE");
         if let Some(file) = file {
             command.env("MB_RUN_PERSON_FILE", file);
@@ -162,7 +162,7 @@ fn configured_author_survives_automatic_wakes_but_never_replaces_another_person(
         assert!(output.contains("author:James <j@example.com>"), "{output}");
         assert!(output.contains("committer:pointman-app[bot]"), "{output}");
         assert!(output.contains("arg:Co-authored-by: Pointman <noreply@pointman.ai>"), "{output}");
-        // the run's client after Pointman (EXT-148)
+        // the run's harness after Pointman (EXT-148)
         assert!(output.contains("arg:Co-authored-by: Claude <noreply@anthropic.com>"), "{output}");
     }
     assert!(run("sam", None).contains("author:Sam <s@example.com>"));
@@ -188,7 +188,7 @@ fn runs_act_as_pointman_app_once_the_board_has_it() {
     let state = node.state_dir_path().to_path_buf();
     settled(&state);
 
-    let got = node.call("session.prepare", json!({"client": "claude", "handle": {"handle": "scene"}})).unwrap();
+    let got = node.call("session.prepare", json!({"harness": "claude", "handle": {"handle": "scene"}})).unwrap();
     let env = &got["env"];
     assert!(env.get("GH_TOKEN").is_none(), "{got}");
     let shims = state.join("app/bin");
