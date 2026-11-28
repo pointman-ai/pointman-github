@@ -102,7 +102,7 @@ fn write_shim(h: &Handle) -> anyhow::Result<()> {
         cli(h).as_deref(),
         &h.settings()["coauthors"],
         h.settings()["default_author"].as_str().unwrap_or_default(),
-        &h.settings()["client_coauthors"],
+        &h.settings()["harness_coauthors"],
     )
     .context("couldn't write the runs' gh")?;
     Ok(())

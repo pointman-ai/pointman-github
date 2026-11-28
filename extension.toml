@@ -5,10 +5,10 @@
 [extension]
 id = "github"
 name = "GitHub"
-version = "0.14.0"
+version = "0.15.0"
 publisher = "aurelio"
 summary = "GitHub's CLI on this machine, and agents' runs acting on GitHub as Pointman App, else as the machine's gh login."
-node = ">=0.4.4"
+node = ">=0.6,<1"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
@@ -29,7 +29,7 @@ skill = "SKILL.md"
 # https, and commits are the App's bot's. Where the App can't act, both use the machine's own `gh` login (EXT-116;
 # James, Pointman thread 25602 [29623]), and say so.
 [sessions]
-clients = ["claude", "codex", "opencode"]
+harnesses = ["claude", "codex", "opencode"]
 path = ["app/bin"]                # the runs' `gh` shim, put first on PATH by the node
 env = [
   "GIT_TERMINAL_PROMPT",
@@ -61,10 +61,10 @@ type = "string"
 default = ""
 description = "Who is credited on commits in runs no person started (an agent's mention, a timer, a workflow): a Pointman handle from coauthors (for example james), app for no one (App-only), or empty for this machine's own GitHub account (its gh login). A person who directly starts a run takes precedence. PRs are still opened by the App."
 
-[settings.properties.client_coauthors]
+[settings.properties.harness_coauthors]
 type = "object"
 default = { claude = "Claude <noreply@anthropic.com>" }
-description = "The agent's client credited as a co-author after Pointman, by the client's name (claude, codex, gemini…), on the commits a person is credited on. A client not in it gets no line."
+description = "The agent's harness credited as a co-author after Pointman, by the harness's name (claude, codex, gemini…), on the commits a person is credited on. A harness not in it gets no line."
 
-[settings.properties.client_coauthors.additionalProperties]
+[settings.properties.harness_coauthors.additionalProperties]
 type = "string"
